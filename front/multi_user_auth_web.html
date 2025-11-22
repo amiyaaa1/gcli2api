@@ -269,6 +269,9 @@
             <h1>Google OAuth 认证</h1>
             <div class="login-form">
                 <div class="form-group">
+                    <input type="text" id="username" placeholder="请输入账号" onkeypress="handlePasswordEnter(event)" />
+                </div>
+                <div class="form-group">
                     <input type="password" id="password" placeholder="请输入访问密码" onkeypress="handlePasswordEnter(event)" />
                 </div>
                 <button class="btn" onclick="login()">登录</button>
@@ -421,9 +424,10 @@
         // 登录相关函数
         async function login() {
             const password = document.getElementById('password').value;
-            
-            if (!password) {
-                showStatus('请输入密码', 'error');
+            const username = document.getElementById('username').value;
+
+            if (!username || !password) {
+                showStatus('请输入账号和密码', 'error');
                 return;
             }
 
@@ -433,7 +437,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ password: password })
+                    body: JSON.stringify({ username: username, password: password })
                 });
 
                 const data = await response.json();

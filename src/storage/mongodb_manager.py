@@ -55,20 +55,23 @@ class MongoDBCacheBackend(CacheBackend):
 
 
 class MongoDBManager:
-    """MongoDB数据库管理器"""
+    """MongoDB数据库管理器，支持 namespace 进行数据隔离"""
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         self._client: Optional[motor.motor_asyncio.AsyncIOMotorClient] = None
         self._db: Optional[motor.motor_asyncio.AsyncIOMotorDatabase] = None
         self._initialized = False
         self._lock = asyncio.Lock()
+
+        self._namespace = namespace
 
         # 配置
         self._connection_uri = None
         self._database_name = None
 
         # 单文档设计 - 所有凭证存在一个文档中（类似TOML文件）
-        self._collection_name = "credentials_data"
+        base_collection = "credentials_data"
+        self._collection_name = f"{base_collection}_{namespace}" if namespace else base_collection
 
         # 性能监控
         self._operation_count = 0
@@ -79,8 +82,9 @@ class MongoDBManager:
         self._config_cache_manager: Optional[UnifiedCacheManager] = None
 
         # 文档key定义
-        self._credentials_doc_key = "all_credentials"
-        self._config_doc_key = "config_data"
+        prefix = f"{namespace}:" if namespace else ""
+        self._credentials_doc_key = f"{prefix}all_credentials"
+        self._config_doc_key = f"{prefix}config_data"
 
         # 写入配置参数
         self._write_delay = 1.0  # 写入延迟（秒）

@@ -486,7 +486,9 @@
         <!-- 登录界面 -->
         <div id="loginSection" class="login-form">
             <h1>GCLI2API 移动端控制面板</h1>
-            <p>请输入访问密码：</p>
+            <p>请输入账户和密码：</p>
+            <input type="text" id="loginUsername" placeholder="输入账号" onkeypress="handlePasswordEnter(event)" />
+            <br><br>
             <input type="password" id="loginPassword" placeholder="输入密码" onkeypress="handlePasswordEnter(event)" />
             <br><br>
             <button class="btn" onclick="login()">登录</button>
@@ -1422,9 +1424,10 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         // 登录相关函数
         async function login() {
             const password = document.getElementById('loginPassword').value;
+            const username = document.getElementById('loginUsername').value;
 
-            if (!password) {
-                showStatus('请输入密码', 'error');
+            if (!username || !password) {
+                showStatus('请输入账号和密码', 'error');
                 return;
             }
 
@@ -1434,7 +1437,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ password: password })
+                    body: JSON.stringify({ username: username, password: password })
                 });
 
                 const data = await response.json();

@@ -14,6 +14,20 @@
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/97VMEF?referralCode=su-kaka)
 ---
 
+## 🆕 更新：多账户隔离版（Zeabur 可部署）
+
+- 新增账户命名空间隔离：每个账户的凭证、配置、使用统计均独立存储，互不影响。
+- 登录改为用户名+密码，默认管理员账号为 `admin`，密码沿用 `PANEL_PASSWORD`（未设置则回退到 `PASSWORD`，默认 `pwd`）。
+- 管理员在前端「账号管理」页即可新增/修改/删除账户并设置管理员权限。
+
+### 更新后使用方式
+1. **部署环境变量**：在 Zeabur 模板中设置 `PANEL_PASSWORD`（控制面板/默认管理员密码）以及 `API_PASSWORD`（聊天接口密码，可选）。
+2. **首次登录**：访问服务根路径，使用 `admin` + `PANEL_PASSWORD` 登录，获取面板令牌。
+3. **创建业务账号**：在「账号管理」中新增需要的业务账号（可选择是否为管理员）。
+4. **账号隔离操作**：切换为目标账号登录后，上传凭证、查看日志、配置参数、使用统计都会自动进入该账号的独立空间。
+5. **API 调用**：OpenAI/Gemini 代理接口仍使用 `API_PASSWORD` 校验，请为每个账号配好对应凭证后按原有方式调用。
+
+
 ## ⚠️ 许可证声明
 
 **本项目采用 Cooperative Non-Commercial License (CNC-1.0)**

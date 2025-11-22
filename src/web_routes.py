@@ -32,6 +32,12 @@ from starlette.websockets import WebSocketState
 import config
 from log import log
 
+from .account_manager import (
+    is_admin,
+    list_accounts,
+    remove_account,
+    upsert_account,
+)
 from .auth import (
     asyncio_complete_auth_flow,
     clear_env_credentials,
@@ -39,12 +45,13 @@ from .auth import (
     create_auth_url,
     generate_auth_token,
     get_auth_status,
+    get_token_username,
     load_credentials_from_env,
     verify_auth_token,
     verify_password,
 )
 from .credential_manager import CredentialManager
-from .storage_adapter import get_storage_adapter
+from .storage_adapter import get_storage_adapter, set_active_namespace
 from .usage_stats import get_aggregated_stats, get_usage_stats, get_usage_stats_instance
 
 # 创建路由器
@@ -53,6 +60,7 @@ security = HTTPBearer()
 
 # 创建credential manager实例
 credential_manager = CredentialManager()
+credential_managers: dict[str, CredentialManager] = {}
 
 # WebSocket连接管理
 
@@ -136,19 +144,21 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def ensure_credential_manager_initialized():
+async def ensure_credential_manager_initialized(username: str):
     """确保credential manager已初始化"""
-    if not credential_manager._initialized:
-        await credential_manager.initialize()
+    manager = await get_credential_manager(username)
+    if not manager._initialized:
+        await manager.initialize()
 
 
-async def get_credential_manager():
-    """获取全局凭证管理器实例"""
-    global credential_manager
-    if not credential_manager:
-        credential_manager = CredentialManager()
-        await credential_manager.initialize()
-    return credential_manager
+async def get_credential_manager(username: str):
+    """获取指定用户的凭证管理器实例"""
+    if username not in credential_managers:
+        credential_managers[username] = CredentialManager(namespace=username)
+    manager = credential_managers[username]
+    if not manager._initialized:
+        await manager.initialize()
+    return manager
 
 
 async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
@@ -163,6 +173,7 @@ async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(secur
 
 
 class LoginRequest(BaseModel):
+    username: str
     password: str
 
 
@@ -196,11 +207,29 @@ class ConfigSaveRequest(BaseModel):
     config: dict
 
 
+class AccountUpsertRequest(BaseModel):
+    username: str
+    password: str
+    is_admin: bool = False
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """验证认证令牌"""
-    if not verify_auth_token(credentials.credentials):
+    token = credentials.credentials
+    username = get_token_username(token)
+    if not username or not verify_auth_token(token):
         raise HTTPException(status_code=401, detail="无效的认证令牌")
-    return credentials.credentials
+    set_active_namespace(username)
+    return token
+
+
+async def resolve_username_from_token(token: str) -> str:
+    username = get_token_username(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="无效的认证令牌")
+
+    set_active_namespace(username)
+    return username
 
 
 def is_mobile_user_agent(user_agent: str) -> bool:
@@ -278,9 +307,17 @@ async def serve_control_panel(request: Request):
 async def login(request: LoginRequest):
     """用户登录"""
     try:
-        if await verify_password(request.password):
-            token = generate_auth_token()
-            return JSONResponse(content={"token": token, "message": "登录成功"})
+        if await verify_password(request.username, request.password):
+            token = generate_auth_token(request.username)
+            admin_flag = await is_admin(request.username)
+            return JSONResponse(
+                content={
+                    "token": token,
+                    "message": "登录成功",
+                    "username": request.username,
+                    "is_admin": admin_flag,
+                }
+            )
         else:
             raise HTTPException(status_code=401, detail="密码错误")
     except HTTPException:
@@ -290,10 +327,41 @@ async def login(request: LoginRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/accounts")
+async def list_all_accounts(token: str = Depends(verify_token)):
+    username = get_token_username(token)
+    if not await is_admin(username):
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+
+    accounts = await list_accounts()
+    return JSONResponse(content={"accounts": accounts})
+
+
+@router.post("/accounts")
+async def upsert_account_route(request: AccountUpsertRequest, token: str = Depends(verify_token)):
+    username = get_token_username(token)
+    if not await is_admin(username):
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+
+    await upsert_account(request.username, request.password, request.is_admin)
+    return JSONResponse(content={"message": "账号已保存"})
+
+
+@router.delete("/accounts/{username}")
+async def delete_account(username: str, token: str = Depends(verify_token)):
+    requester = get_token_username(token)
+    if not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+
+    await remove_account(username)
+    return JSONResponse(content={"message": "账号已删除"})
+
+
 @router.post("/auth/start")
 async def start_auth(request: AuthStartRequest, token: str = Depends(verify_token)):
     """开始认证流程，支持自动检测项目ID和批量获取所有项目"""
     try:
+        username = await resolve_username_from_token(token)
         # 检查是否为批量项目模式
         if request.get_all_projects:
             log.info("用户请求批量获取所有项目的凭证...")
@@ -305,7 +373,7 @@ async def start_auth(request: AuthStartRequest, token: str = Depends(verify_toke
                 log.info("用户未提供项目ID，后续将使用自动检测...")
 
         # 使用认证令牌作为用户会话标识
-        user_session = token if token else None
+        user_session = f"{username}:{token}" if token else None
         result = await create_auth_url(
             project_id, user_session, get_all_projects=request.get_all_projects
         )
@@ -334,12 +402,13 @@ async def start_auth(request: AuthStartRequest, token: str = Depends(verify_toke
 async def auth_callback(request: AuthCallbackRequest, token: str = Depends(verify_token)):
     """处理认证回调，支持自动检测项目ID和批量获取所有项目"""
     try:
+        username = await resolve_username_from_token(token)
         # 项目ID现在是可选的，在回调处理中进行自动检测
         project_id = request.project_id
         get_all_projects = request.get_all_projects
 
         # 使用认证令牌作为用户会话标识
-        user_session = token if token else None
+        user_session = f"{username}:{token}" if token else None
         # 异步等待OAuth回调完成
         result = await asyncio_complete_auth_flow(
             project_id, user_session, get_all_projects=get_all_projects
@@ -396,6 +465,7 @@ async def auth_callback(request: AuthCallbackRequest, token: str = Depends(verif
 async def auth_callback_url(request: AuthCallbackUrlRequest, token: str = Depends(verify_token)):
     """从回调URL直接完成认证，支持批量获取所有项目"""
     try:
+        await resolve_username_from_token(token)
         # 验证URL格式
         if not request.callback_url or not request.callback_url.startswith(("http://", "https://")):
             raise HTTPException(status_code=400, detail="请提供有效的回调URL")
@@ -690,14 +760,16 @@ async def upload_credentials(
 async def get_creds_status(token: str = Depends(verify_token)):
     """获取所有凭证文件的状态"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
+        manager = await get_credential_manager(username)
 
         # 获取存储适配器
         storage_adapter = await get_storage_adapter()
 
         # 获取所有凭证和状态
         all_credentials = await storage_adapter.list_credentials()
-        all_states = await credential_manager.get_creds_status()
+        all_states = await manager.get_creds_status()
 
         # 获取后端信息（一次性获取，避免重复查询）
         backend_info = await storage_adapter.get_backend_info()
@@ -806,7 +878,9 @@ async def get_creds_status(token: str = Depends(verify_token)):
 async def creds_action(request: CredFileActionRequest, token: str = Depends(verify_token)):
     """对凭证文件执行操作（启用/禁用/删除）"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
+        manager = await get_credential_manager(username)
 
         log.info(f"Received request: {request}")
 
@@ -831,13 +905,13 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
 
         if action == "enable":
             log.info(f"Web request: ENABLING file {filename}")
-            await credential_manager.set_cred_disabled(filename, False)
+            await manager.set_cred_disabled(filename, False)
             log.info(f"Web request: ENABLED file {filename} successfully")
             return JSONResponse(content={"message": f"已启用凭证文件 {os.path.basename(filename)}"})
 
         elif action == "disable":
             log.info(f"Web request: DISABLING file {filename}")
-            await credential_manager.set_cred_disabled(filename, True)
+            await manager.set_cred_disabled(filename, True)
             log.info(f"Web request: DISABLED file {filename} successfully")
             return JSONResponse(content={"message": f"已禁用凭证文件 {os.path.basename(filename)}"})
 
@@ -872,7 +946,9 @@ async def creds_batch_action(
 ):
     """批量对凭证文件执行操作（启用/禁用/删除）"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
+        manager = await get_credential_manager(username)
 
         action = request.action
         filenames = request.filenames
@@ -903,11 +979,11 @@ async def creds_batch_action(
 
                 # 执行相应操作
                 if action == "enable":
-                    await credential_manager.set_cred_disabled(filename, False)
+                    await manager.set_cred_disabled(filename, False)
                     success_count += 1
 
                 elif action == "disable":
-                    await credential_manager.set_cred_disabled(filename, True)
+                    await manager.set_cred_disabled(filename, True)
                     success_count += 1
 
                 elif action == "delete":
@@ -991,7 +1067,9 @@ async def download_cred_file(filename: str, token: str = Depends(verify_token)):
 async def fetch_user_email(filename: str, token: str = Depends(verify_token)):
     """获取指定凭证文件的用户邮箱地址"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
+        manager = await get_credential_manager(username)
 
         # 标准化文件名（只保留文件名部分）
         import os
@@ -1007,7 +1085,7 @@ async def fetch_user_email(filename: str, token: str = Depends(verify_token)):
             raise HTTPException(status_code=404, detail="凭证文件不存在")
 
         # 获取用户邮箱（使用凭证名称而不是文件路径）
-        email = await credential_manager.get_or_fetch_user_email(filename_only)
+        email = await manager.get_or_fetch_user_email(filename_only)
 
         if email:
             return JSONResponse(
@@ -1038,7 +1116,9 @@ async def fetch_user_email(filename: str, token: str = Depends(verify_token)):
 async def refresh_all_user_emails(token: str = Depends(verify_token)):
     """刷新所有凭证文件的用户邮箱地址"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
+        manager = await get_credential_manager(username)
 
         # 获取存储适配器
         storage_adapter = await get_storage_adapter()
@@ -1051,7 +1131,7 @@ async def refresh_all_user_emails(token: str = Depends(verify_token)):
 
         for filename in credential_filenames:
             try:
-                email = await credential_manager.get_or_fetch_user_email(filename)
+                email = await manager.get_or_fetch_user_email(filename)
                 if email:
                     success_count += 1
                     results.append(
@@ -1142,7 +1222,8 @@ async def download_all_creds(token: str = Depends(verify_token)):
 async def get_config(token: str = Depends(verify_token)):
     """获取当前配置"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
 
         # 导入配置相关模块
 
@@ -1250,7 +1331,8 @@ async def get_config(token: str = Depends(verify_token)):
 async def save_config(request: ConfigSaveRequest, token: str = Depends(verify_token)):
     """保存配置到TOML文件"""
     try:
-        await ensure_credential_manager_initialized()
+        username = get_token_username(token)
+        await ensure_credential_manager_initialized(username)
         new_config = request.config
 
         log.debug(f"收到的配置数据: {list(new_config.keys())}")

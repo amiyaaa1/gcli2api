@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Protocol
 
 from log import log
@@ -84,12 +85,18 @@ class StorageBackend(Protocol):
 
 
 class StorageAdapter:
-    """存储适配器，根据配置选择存储后端"""
+    """存储适配器，根据配置选择存储后端。
 
-    def __init__(self):
+    支持可选的 namespace，用于实现多账户间的数据隔离。每个 namespace
+    都会拥有独立的存储后端实例（例如独立的文件目录、Redis/Mongo 文档
+    key 或 Postgres 行 key），保证不同账户的数据互不影响。
+    """
+
+    def __init__(self, namespace: str | None = None):
         self._backend: Optional["StorageBackend"] = None
         self._initialized = False
         self._lock = asyncio.Lock()
+        self._namespace = namespace
 
     async def initialize(self) -> None:
         """初始化存储适配器"""
@@ -106,7 +113,7 @@ class StorageAdapter:
                 try:
                     from .storage.redis_manager import RedisManager
 
-                    self._backend = RedisManager()
+                    self._backend = RedisManager(namespace=self._namespace)
                     await self._backend.initialize()
                     log.info("Using Redis storage backend")
                 except ImportError as e:
@@ -122,7 +129,7 @@ class StorageAdapter:
                 try:
                     from .storage.postgres_manager import PostgresManager
 
-                    self._backend = PostgresManager()
+                    self._backend = PostgresManager(namespace=self._namespace)
                     await self._backend.initialize()
                     log.info("Using Postgres storage backend")
                 except ImportError as e:
@@ -137,7 +144,7 @@ class StorageAdapter:
                 try:
                     from .storage.mongodb_manager import MongoDBManager
 
-                    self._backend = MongoDBManager()
+                    self._backend = MongoDBManager(namespace=self._namespace)
                     await self._backend.initialize()
                     log.info("Using MongoDB storage backend")
                 except ImportError as e:
@@ -151,7 +158,7 @@ class StorageAdapter:
             if not self._backend:
                 from .storage.file_storage_manager import FileStorageManager
 
-                self._backend = FileStorageManager()
+                self._backend = FileStorageManager(namespace=self._namespace)
                 await self._backend.initialize()
                 log.info("Using file storage backend")
 
@@ -344,24 +351,44 @@ class StorageAdapter:
 
 
 # 全局存储适配器实例
-_storage_adapter: Optional[StorageAdapter] = None
+_storage_adapters: Dict[str, StorageAdapter] = {}
+_current_namespace: ContextVar[Optional[str]] = ContextVar("storage_namespace", default=None)
 
 
-async def get_storage_adapter() -> StorageAdapter:
-    """获取全局存储适配器实例"""
-    global _storage_adapter
-
-    if _storage_adapter is None:
-        _storage_adapter = StorageAdapter()
-        await _storage_adapter.initialize()
-
-    return _storage_adapter
+def _get_namespace_key(namespace: str | None) -> str:
+    return namespace or "__default__"
 
 
-async def close_storage_adapter():
-    """关闭全局存储适配器"""
-    global _storage_adapter
+def set_active_namespace(namespace: str | None):
+    """设置当前上下文的存储命名空间，用于实现多账户隔离。"""
+    _current_namespace.set(namespace)
 
-    if _storage_adapter:
-        await _storage_adapter.close()
-        _storage_adapter = None
+
+def get_active_namespace() -> Optional[str]:
+    return _current_namespace.get()
+
+
+async def get_storage_adapter(namespace: str | None = None) -> StorageAdapter:
+    """获取指定 namespace 的存储适配器实例（默认共享实例）。"""
+    global _storage_adapters
+
+    active_namespace = namespace if namespace is not None else get_active_namespace()
+    key = _get_namespace_key(active_namespace)
+
+    if key not in _storage_adapters:
+        adapter = StorageAdapter(namespace=active_namespace)
+        await adapter.initialize()
+        _storage_adapters[key] = adapter
+
+    return _storage_adapters[key]
+
+
+async def close_storage_adapter(namespace: str | None = None):
+    """关闭指定 namespace 的存储适配器实例。"""
+    global _storage_adapters
+
+    key = _get_namespace_key(namespace)
+
+    if key in _storage_adapters:
+        await _storage_adapters[key].close()
+        del _storage_adapters[key]
