@@ -74,18 +74,20 @@ class RedisCacheBackend(CacheBackend):
 class RedisManager:
     """Redis数据库管理器"""
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         self._client: Optional[redis.Redis] = None
         self._initialized = False
         self._lock = asyncio.Lock()
+        self._namespace = namespace
 
         # 配置
         self._connection_uri = None
         self._database_index = 0
 
         # 哈希表设计 - 所有凭证存在一个哈希表中
-        self._credentials_hash_name = "gcli2api:credentials"
-        self._config_hash_name = "gcli2api:config"
+        prefix = f"gcli2api:{self._namespace}:" if self._namespace else "gcli2api:"
+        self._credentials_hash_name = f"{prefix}credentials"
+        self._config_hash_name = f"{prefix}config"
 
         # 性能监控
         self._operation_count = 0

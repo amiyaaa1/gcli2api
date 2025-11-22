@@ -16,6 +16,8 @@ from urllib.parse import parse_qs, urlparse
 
 from config import get_config_value
 from log import log
+from .account_manager import authenticate as auth_accounts
+from .account_manager import ensure_default_account, is_admin
 
 from .google_oauth_api import (
     Credentials,
@@ -1206,42 +1208,41 @@ def get_auth_status(project_id: str) -> Dict[str, Any]:
 
 
 # 鉴权功能 - 使用更小的数据结构
-auth_tokens = {}  # 存储有效的认证令牌
+auth_tokens: Dict[str, Dict[str, Any]] = {}  # 存储有效的认证令牌
 TOKEN_EXPIRY = 3600  # 1小时令牌过期时间
 
 
-async def verify_password(password: str) -> bool:
-    """验证密码（面板登录使用）"""
-    from config import get_panel_password
-
-    correct_password = await get_panel_password()
-    return password == correct_password
+async def verify_password(username: str, password: str) -> bool:
+    """验证密码（面板登录使用），基于账户配置。"""
+    await ensure_default_account()
+    return await auth_accounts(username, password)
 
 
-def generate_auth_token() -> str:
+def generate_auth_token(username: str) -> str:
     """生成认证令牌"""
-    # 清理过期令牌
     cleanup_expired_tokens()
 
     token = secrets.token_urlsafe(32)
-    # 只存储创建时间
-    auth_tokens[token] = time.time()
+    auth_tokens[token] = {"username": username, "created_at": time.time()}
     return token
+
+
+def get_token_username(token: str) -> Optional[str]:
+    if not token or token not in auth_tokens:
+        return None
+
+    token_data = auth_tokens[token]
+    created_at = token_data.get("created_at", 0)
+    if time.time() - created_at > TOKEN_EXPIRY:
+        del auth_tokens[token]
+        return None
+
+    return token_data.get("username")
 
 
 def verify_auth_token(token: str) -> bool:
     """验证认证令牌"""
-    if not token or token not in auth_tokens:
-        return False
-
-    created_at = auth_tokens[token]
-
-    # 检查令牌是否过期 (使用更短的过期时间)
-    if time.time() - created_at > TOKEN_EXPIRY:
-        del auth_tokens[token]
-        return False
-
-    return True
+    return get_token_username(token) is not None
 
 
 def cleanup_expired_tokens():
@@ -1249,8 +1250,8 @@ def cleanup_expired_tokens():
     current_time = time.time()
     expired_tokens = [
         token
-        for token, created_at in auth_tokens.items()
-        if current_time - created_at > TOKEN_EXPIRY
+        for token, token_data in auth_tokens.items()
+        if current_time - token_data.get("created_at", 0) > TOKEN_EXPIRY
     ]
 
     for token in expired_tokens:

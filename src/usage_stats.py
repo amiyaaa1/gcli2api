@@ -13,7 +13,7 @@ from config import get_credentials_dir, is_mongodb_mode
 from log import log
 
 from .state_manager import get_state_manager
-from .storage_adapter import get_storage_adapter
+from .storage_adapter import get_active_namespace, get_storage_adapter
 
 
 def _get_next_utc_7am() -> datetime:
@@ -34,7 +34,7 @@ class UsageStats:
     Simplified usage statistics manager with clear reset logic.
     """
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         self._lock = Lock()
         # 状态文件路径将在初始化时异步设置
         self._state_file = None
@@ -46,6 +46,7 @@ class UsageStats:
         self._last_save_time = 0
         self._save_interval = 60  # 最多每分钟保存一次，减少I/O
         self._max_cache_size = 100  # 严格限制缓存大小
+        self._namespace = namespace
 
     async def initialize(self):
         """Initialize the usage stats module."""
@@ -53,7 +54,7 @@ class UsageStats:
             return
 
         # 初始化存储适配器
-        self._storage_adapter = await get_storage_adapter()
+        self._storage_adapter = await get_storage_adapter(namespace=self._namespace)
 
         # 只在文件模式下创建本地状态文件
         if not await is_mongodb_mode():
@@ -437,32 +438,38 @@ class UsageStats:
         await self._save_stats()
 
 
-# Global instance
-_usage_stats_instance: Optional[UsageStats] = None
+# Global instances by namespace
+_usage_stats_instances: Dict[str, UsageStats] = {}
 
 
-async def get_usage_stats_instance() -> UsageStats:
-    """Get the global usage statistics instance."""
-    global _usage_stats_instance
-    if _usage_stats_instance is None:
-        _usage_stats_instance = UsageStats()
-        await _usage_stats_instance.initialize()
-    return _usage_stats_instance
+def _stats_namespace_key(namespace: Optional[str] = None) -> str:
+    active = namespace if namespace is not None else get_active_namespace()
+    return active or "__default__"
 
 
-async def record_successful_call(filename: str, model_name: str):
+async def get_usage_stats_instance(namespace: Optional[str] = None) -> UsageStats:
+    """Get the usage statistics instance for a namespace."""
+    global _usage_stats_instances
+    key = _stats_namespace_key(namespace)
+    if key not in _usage_stats_instances:
+        _usage_stats_instances[key] = UsageStats(namespace=namespace or get_active_namespace())
+        await _usage_stats_instances[key].initialize()
+    return _usage_stats_instances[key]
+
+
+async def record_successful_call(filename: str, model_name: str, namespace: Optional[str] = None):
     """Convenience function to record a successful API call."""
-    stats = await get_usage_stats_instance()
+    stats = await get_usage_stats_instance(namespace)
     await stats.record_successful_call(filename, model_name)
 
 
-async def get_usage_stats(filename: str = None) -> Dict[str, Any]:
+async def get_usage_stats(filename: str = None, namespace: Optional[str] = None) -> Dict[str, Any]:
     """Convenience function to get usage statistics."""
-    stats = await get_usage_stats_instance()
+    stats = await get_usage_stats_instance(namespace)
     return await stats.get_usage_stats(filename)
 
 
-async def get_aggregated_stats() -> Dict[str, Any]:
+async def get_aggregated_stats(namespace: Optional[str] = None) -> Dict[str, Any]:
     """Convenience function to get aggregated statistics."""
-    stats = await get_usage_stats_instance()
+    stats = await get_usage_stats_instance(namespace)
     return await stats.get_aggregated_stats()

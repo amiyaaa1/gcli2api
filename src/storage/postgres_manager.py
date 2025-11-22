@@ -69,12 +69,15 @@ class PostgresCacheBackend(CacheBackend):
 class PostgresManager:
     """Postgres管理器。
     使用单表单行设计存储凭证和配置数据。
+    支持 namespace，将 key 进行前缀隔离，确保多账户数据独立。
     """
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         self._pool: Optional[asyncpg.pool.Pool] = None
         self._initialized = False
         self._lock = asyncio.Lock()
+
+        self._namespace = namespace
 
         self._dsn = None
         self._table_name = "unified_storage"
@@ -86,8 +89,9 @@ class PostgresManager:
         self._credentials_cache_manager: Optional[UnifiedCacheManager] = None
         self._config_cache_manager: Optional[UnifiedCacheManager] = None
 
-        self._credentials_row_key = "all_credentials"
-        self._config_row_key = "config_data"
+        prefix = f"{self._namespace}:" if self._namespace else ""
+        self._credentials_row_key = f"{prefix}all_credentials"
+        self._config_row_key = f"{prefix}config_data"
 
         self._write_delay = 1.0
         self._cache_ttl = 300

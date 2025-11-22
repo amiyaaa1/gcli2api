@@ -905,7 +905,9 @@
         <!-- 登录界面 -->
         <div id="loginSection" class="login-form">
             <h1>GCLI2API 管理面板</h1>
-            <p>请输入访问密码：</p>
+            <p>请输入账户和密码：</p>
+            <input type="text" id="loginUsername" placeholder="输入账号" onkeypress="handlePasswordEnter(event)" />
+            <br>
             <input type="password" id="loginPassword" placeholder="输入密码" onkeypress="handlePasswordEnter(event)" />
             <br>
             <button class="btn" onclick="login()">登录</button>
@@ -923,6 +925,7 @@
                 <button class="tab" onclick="switchTab('manage')">文件管理</button>
                 <button class="tab" onclick="switchTab('usage')">使用统计</button>
                 <button class="tab" onclick="switchTab('config')">配置管理</button>
+                <button class="tab" id="accountTabButton" style="display: none;" onclick="switchTab('account')">账户管理</button>
                 <button class="tab" onclick="switchTab('logs')">实时日志</button>
                 <button class="tab" onclick="switchTab('about')">项目信息</button>
             </div>
@@ -1557,6 +1560,32 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 </div>
             </div>
 
+            <div id="accountTab" class="tab-content">
+                <h3>账户管理（仅管理员可见）</h3>
+                <div class="status info" id="accountGuard">请使用管理员账户登录后管理子账户。</div>
+
+                <div class="form-group">
+                    <label for="newAccountUsername">账号</label>
+                    <input type="text" id="newAccountUsername" placeholder="输入新账号">
+                </div>
+
+                <div class="form-group">
+                    <label for="newAccountPassword">密码</label>
+                    <input type="password" id="newAccountPassword" placeholder="输入密码">
+                </div>
+
+                <div class="form-group">
+                    <label><input type="checkbox" id="newAccountIsAdmin"> 设为管理员</label>
+                </div>
+
+                <button class="btn" onclick="saveAccount()">保存/更新账号</button>
+
+                <div class="form-group">
+                    <h4>已配置账号</h4>
+                    <div id="accountList" class="status info">暂无账号信息</div>
+                </div>
+            </div>
+
             <!-- 实时日志标签页 -->
             <div id="logsTab" class="tab-content">
                 <h3>实时日志</h3>
@@ -1712,6 +1741,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         let authInProgress = false;
         let uploadSelectedFiles = []; // 上传页面用的文件列表
         let authToken = '';
+        let isAdmin = false;
+        let currentUsername = '';
         let credsData = {};
 
         // 分页和筛选相关变量
@@ -1742,11 +1773,12 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         // 登录相关函数
         async function login() {
             console.log('Login function called');
+            const username = document.getElementById('loginUsername').value;
             const password = document.getElementById('loginPassword').value;
             console.log('Password length:', password ? password.length : 0);
 
-            if (!password) {
-                showStatus('请输入密码', 'error');
+            if (!username || !password) {
+                showStatus('请输入账号和密码', 'error');
                 return;
             }
 
@@ -1757,7 +1789,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ password: password })
+                    body: JSON.stringify({ username: username, password: password })
                 });
 
                 console.log('Login response status:', response.status);
@@ -1766,9 +1798,15 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
 
                 if (response.ok) {
                     authToken = data.token;
+                    currentUsername = data.username;
+                    isAdmin = !!data.is_admin;
                     console.log('Login successful, token received');
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
+                    updateAccountTabVisibility();
+                    if (isAdmin) {
+                        await loadAccounts();
+                    }
                     showStatus('登录成功', 'success');
                 } else {
                     console.log('Login failed:', data);
@@ -1783,6 +1821,109 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         function handlePasswordEnter(event) {
             if (event.key === 'Enter') {
                 login();
+            }
+        }
+
+        function updateAccountTabVisibility() {
+            const tabButton = document.getElementById('accountTabButton');
+            const guard = document.getElementById('accountGuard');
+            if (isAdmin) {
+                if (tabButton) tabButton.style.display = 'inline-block';
+                if (guard) guard.classList.add('success');
+            } else {
+                if (tabButton) tabButton.style.display = 'none';
+                if (guard) guard.classList.remove('success');
+            }
+        }
+
+        async function loadAccounts() {
+            if (!isAdmin) return;
+            const listEl = document.getElementById('accountList');
+            try {
+                const response = await fetch('/accounts', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '加载失败');
+
+                listEl.classList.remove('info');
+                listEl.innerHTML = '';
+                if (!data.accounts || data.accounts.length === 0) {
+                    listEl.innerHTML = '暂无账号信息';
+                    return;
+                }
+
+                data.accounts.forEach(account => {
+                    const row = document.createElement('div');
+                    row.className = 'status info';
+                    row.style.display = 'flex';
+                    row.style.justifyContent = 'space-between';
+                    row.style.alignItems = 'center';
+                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''}</span>`;
+                    const actions = document.createElement('div');
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.textContent = '删除';
+                    deleteBtn.className = 'btn';
+                    deleteBtn.style.backgroundColor = '#dc3545';
+                    deleteBtn.onclick = () => deleteAccount(account.username);
+                    actions.appendChild(deleteBtn);
+                    row.appendChild(actions);
+                    listEl.appendChild(row);
+                });
+            } catch (error) {
+                listEl.classList.add('info');
+                listEl.innerHTML = `加载账号失败：${error.message}`;
+            }
+        }
+
+        async function saveAccount() {
+            if (!isAdmin) {
+                showStatus('只有管理员可以管理账户', 'error');
+                return;
+            }
+
+            const username = document.getElementById('newAccountUsername').value;
+            const password = document.getElementById('newAccountPassword').value;
+            const adminFlag = document.getElementById('newAccountIsAdmin').checked;
+
+            if (!username || !password) {
+                showStatus('请填写账号和密码', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/accounts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ username, password, is_admin: adminFlag })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '保存失败');
+
+                showStatus(data.message || '账号已保存', 'success');
+                document.getElementById('newAccountPassword').value = '';
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`保存账号失败：${error.message}`, 'error');
+            }
+        }
+
+        async function deleteAccount(username) {
+            if (!isAdmin) return;
+            try {
+                const response = await fetch(`/accounts/${encodeURIComponent(username)}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '删除失败');
+                showStatus(data.message || '账号已删除', 'success');
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`删除账号失败：${error.message}`, 'error');
             }
         }
 

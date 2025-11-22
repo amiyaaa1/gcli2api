@@ -94,12 +94,13 @@ class FileStorageManager:
         state["last_success"] = time.time()
         return state
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         self._credentials_dir = None  # 将通过异步初始化设置
         self._state_file = None
         self._config_file = None
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._namespace = namespace
 
         # 统一缓存管理器
         self._credentials_cache_manager: Optional[UnifiedCacheManager] = None
@@ -115,7 +116,11 @@ class FileStorageManager:
             return
 
         # 获取凭证目录配置（初始化时直接使用环境变量，避免循环依赖）
-        self._credentials_dir = os.getenv("CREDENTIALS_DIR", "./creds")
+        base_dir = os.getenv("CREDENTIALS_DIR", "./creds")
+        if self._namespace:
+            self._credentials_dir = os.path.join(base_dir, self._namespace)
+        else:
+            self._credentials_dir = base_dir
         self._state_file = os.path.join(self._credentials_dir, "creds.toml")
         self._config_file = os.path.join(self._credentials_dir, "config.toml")
 

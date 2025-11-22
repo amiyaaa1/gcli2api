@@ -22,10 +22,11 @@ class CredentialManager:
     所有存储操作通过storage_adapter进行
     """
 
-    def __init__(self):
+    def __init__(self, namespace: str | None = None):
         # 核心状态
         self._initialized = False
         self._storage_adapter = None
+        self._namespace = namespace
 
         # 凭证轮换相关
         self._credential_files: List[str] = []  # 存储凭证文件名列表
@@ -61,8 +62,8 @@ class CredentialManager:
             if self._initialized:
                 return
 
-            # 初始化统一存储适配器
-            self._storage_adapter = await get_storage_adapter()
+            # 初始化统一存储适配器，保持多账户命名空间隔离
+            self._storage_adapter = await get_storage_adapter(namespace=self._namespace)
 
             # 启动后台工作线程
             await self._start_background_workers()
