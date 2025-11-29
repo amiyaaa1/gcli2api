@@ -505,6 +505,7 @@
                 <button class="tab" onclick="switchTab('envload')">环境变量</button>
                 <button class="tab" onclick="switchTab('manage')">文件管理</button>
                 <button class="tab" onclick="switchTab('usage')">使用统计</button>
+                <button id="accountTabButton" class="tab" style="display: none;" onclick="switchTab('account')">账户管理</button>
                 <button id="configTabButton" class="tab" onclick="switchTab('config')">配置管理</button>
                 <button class="tab" onclick="switchTab('logs')">实时日志</button>
                 <button class="tab" onclick="switchTab('about')">项目信息</button>
@@ -641,6 +642,51 @@
                     <h4>认证文件内容：</h4>
                     <div style="background-color: #f0f8ff; border: 1px solid #b0d4ff; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto;"
                         id="credentialsContent"></div>
+                </div>
+            </div>
+
+            <!-- 账户管理标签页 -->
+            <div id="accountTab" class="tab-content">
+                <h3>账户管理（仅管理员可见）</h3>
+                <div id="accountGuard" class="status info">请使用管理员账户登录后管理子账户。</div>
+
+                <div id="adminOverview" class="hidden">
+                    <div class="status info" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
+                        <div><strong>总调用次数</strong><div id="overviewTotalCalls">0</div></div>
+                        <div><strong>总输入 Tokens</strong><div id="overviewPromptTokens">0</div></div>
+                        <div><strong>总输出 Tokens</strong><div id="overviewCompletionTokens">0</div></div>
+                        <div><strong>凭证总数</strong><div id="overviewCredentials">0</div></div>
+                    </div>
+
+                    <div class="card" style="margin-top: 12px;">
+                        <h4 style="margin: 0 0 8px 0;">用户概览</h4>
+                        <div id="adminUserList" class="status info" style="margin: 0;">暂无用户统计</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label for="newAccountUsername">账号</label>
+                        <input type="text" id="newAccountUsername" placeholder="输入新账号">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="newAccountPassword">密码</label>
+                        <input type="password" id="newAccountPassword" placeholder="输入密码">
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center;">
+                            <input type="checkbox" id="newAccountIsAdmin" style="margin-right: 8px;">设为管理员
+                        </label>
+                    </div>
+
+                    <button class="btn" onclick="saveAccount()">保存/更新账号</button>
+                </div>
+
+                <div class="card">
+                    <h4 style="margin-top: 0;">已配置账号</h4>
+                    <div id="accountList" class="status info">暂无账号信息</div>
                 </div>
             </div>
 
@@ -1449,6 +1495,10 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
                     updateConfigTabVisibility();
+                    updateAccountTabVisibility();
+                    if (isAdmin) {
+                        await loadAccounts();
+                    }
                     showStatus('登录成功', 'success');
                 } else {
                     showStatus(`登录失败: ${data.detail || data.error || '未知错误'}`, 'error');
@@ -1479,6 +1529,18 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
         }
 
+        function updateAccountTabVisibility() {
+            const tabButton = document.getElementById('accountTabButton');
+            const guard = document.getElementById('accountGuard');
+            if (isAdmin) {
+                if (tabButton) tabButton.style.display = 'inline-block';
+                if (guard) guard.classList.add('success');
+            } else {
+                if (tabButton) tabButton.style.display = 'none';
+                if (guard) guard.classList.remove('success');
+            }
+        }
+
         // 标签页切换
         function switchTab(tabName) {
             // 移除所有活动标签
@@ -1501,6 +1563,10 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             if (tabName === 'usage') {
                 refreshUsageStats();
             }
+            // 如果切换到账户管理页面，自动加载账号
+            if (tabName === 'account' && isAdmin) {
+                loadAccounts();
+            }
             // 如果切换到配置管理页面，自动加载配置
             if (tabName === 'config') {
                 loadConfig();
@@ -1512,6 +1578,168 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             // 如果离开日志页面，断开WebSocket连接
             if (event.target.textContent !== '实时日志' && logStreamActive) {
                 stopLogStream();
+            }
+        }
+
+        async function loadAccounts() {
+            if (!isAdmin) return;
+            const listEl = document.getElementById('accountList');
+            try {
+                const response = await fetch('/accounts', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '加载失败');
+
+                listEl.classList.remove('info');
+                listEl.innerHTML = '';
+                if (!data.accounts || data.accounts.length === 0) {
+                    listEl.innerHTML = '暂无账号信息';
+                    return;
+                }
+
+                data.accounts.forEach(account => {
+                    const row = document.createElement('div');
+                    row.className = 'status info';
+                    row.style.display = 'flex';
+                    row.style.justifyContent = 'space-between';
+                    row.style.alignItems = 'center';
+                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''} ${account.disabled ? '（已禁用）' : ''}</span>`;
+                    const actions = document.createElement('div');
+                    const disableBtn = document.createElement('button');
+                    disableBtn.textContent = account.disabled ? '启用' : '禁用';
+                    disableBtn.className = 'btn btn-small';
+                    disableBtn.style.backgroundColor = account.disabled ? '#28a745' : '#ffc107';
+                    disableBtn.onclick = () => toggleAccount(account.username, !account.disabled);
+                    actions.appendChild(disableBtn);
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.textContent = '删除';
+                    deleteBtn.className = 'btn btn-small';
+                    deleteBtn.style.backgroundColor = '#dc3545';
+                    deleteBtn.onclick = () => deleteAccount(account.username);
+                    actions.appendChild(deleteBtn);
+                    row.appendChild(actions);
+                    listEl.appendChild(row);
+                });
+
+                await loadAdminOverview();
+            } catch (error) {
+                listEl.classList.add('info');
+                listEl.innerHTML = `加载账号失败：${error.message}`;
+            }
+        }
+
+        async function loadAdminOverview() {
+            if (!isAdmin) return;
+            const overview = document.getElementById('adminOverview');
+            const userList = document.getElementById('adminUserList');
+            try {
+                const response = await fetch('/admin/overview', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '加载统计失败');
+
+                overview.classList.remove('hidden');
+                document.getElementById('overviewTotalCalls').textContent = data.totals.total_calls || 0;
+                document.getElementById('overviewPromptTokens').textContent = data.totals.total_prompt_tokens || 0;
+                document.getElementById('overviewCompletionTokens').textContent = data.totals.total_completion_tokens || 0;
+                document.getElementById('overviewCredentials').textContent = data.totals.total_credentials || 0;
+
+                if (!data.users || data.users.length === 0) {
+                    userList.textContent = '暂无用户统计';
+                    return;
+                }
+
+                userList.innerHTML = '';
+                data.users.forEach(user => {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'status info';
+                    wrapper.style.marginBottom = '8px';
+                    wrapper.innerHTML = `
+                        <div><strong>${user.username}${user.is_admin ? '（管理员）' : ''}${user.disabled ? ' - 已禁用' : ''}</strong></div>
+                        <div>凭证：${user.credential_count || 0}</div>
+                        <div>调用：${user.usage?.total_all_model_calls || 0}</div>
+                        <div>输入Tokens：${user.usage?.total_prompt_tokens || 0}</div>
+                        <div>输出Tokens：${user.usage?.total_completion_tokens || 0}</div>
+                        <div>最后调用：${user.last_call ? new Date(user.last_call * 1000).toLocaleString() : '暂无'}</div>
+                    `;
+                    userList.appendChild(wrapper);
+                });
+            } catch (error) {
+                if (overview) overview.classList.add('hidden');
+                if (userList) userList.textContent = `加载统计失败：${error.message}`;
+            }
+        }
+
+        async function saveAccount() {
+            if (!isAdmin) {
+                showStatus('只有管理员可以管理账户', 'error');
+                return;
+            }
+
+            const username = document.getElementById('newAccountUsername').value;
+            const password = document.getElementById('newAccountPassword').value;
+            const adminFlag = document.getElementById('newAccountIsAdmin').checked;
+
+            if (!username || !password) {
+                showStatus('请填写账号和密码', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/accounts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ username, password, is_admin: adminFlag })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '保存失败');
+
+                showStatus(data.message || '账号已保存', 'success');
+                document.getElementById('newAccountPassword').value = '';
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`保存账号失败：${error.message}`, 'error');
+            }
+        }
+
+        async function deleteAccount(username) {
+            if (!isAdmin) return;
+            try {
+                const response = await fetch(`/accounts/${encodeURIComponent(username)}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '删除失败');
+                showStatus(data.message || '账号已删除', 'success');
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`删除账号失败：${error.message}`, 'error');
+            }
+        }
+
+        async function toggleAccount(username, disabled) {
+            if (!isAdmin) return;
+            try {
+                const response = await fetch(`/accounts/${encodeURIComponent(username)}/disable`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ disabled })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '操作失败');
+                showStatus(data.message || '状态已更新', 'success');
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`更新账号状态失败：${error.message}`, 'error');
             }
         }
 

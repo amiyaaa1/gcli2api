@@ -22,6 +22,7 @@ from src.auth import (
     verify_auth_token,
     verify_password,
 )
+from src.account_manager import is_admin
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -84,7 +85,12 @@ async def login(request: LoginRequest):
         if await verify_password(request.username, request.password):
             token = generate_auth_token(request.username)
             return JSONResponse(
-                content={"token": token, "message": "登录成功", "username": request.username}
+                content={
+                    "token": token,
+                    "message": "登录成功",
+                    "username": request.username,
+                    "is_admin": await is_admin(request.username),
+                }
             )
         else:
             raise HTTPException(status_code=401, detail="密码错误")
