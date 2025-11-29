@@ -924,7 +924,7 @@
                 <button class="tab" onclick="switchTab('envload')">环境变量</button>
                 <button class="tab" onclick="switchTab('manage')">文件管理</button>
                 <button class="tab" onclick="switchTab('usage')">使用统计</button>
-                <button class="tab" onclick="switchTab('config')">配置管理</button>
+                <button id="configTabButton" class="tab" onclick="switchTab('config')">配置管理</button>
                 <button class="tab" id="accountTabButton" style="display: none;" onclick="switchTab('account')">账户管理</button>
                 <button class="tab" onclick="switchTab('logs')">实时日志</button>
                 <button class="tab" onclick="switchTab('about')">项目信息</button>
@@ -1564,6 +1564,20 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 <h3>账户管理（仅管理员可见）</h3>
                 <div class="status info" id="accountGuard">请使用管理员账户登录后管理子账户。</div>
 
+                <div id="adminOverview" class="hidden">
+                    <div class="status info" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+                        <div><strong>总调用次数</strong><div id="overviewTotalCalls">0</div></div>
+                        <div><strong>总输入 Tokens</strong><div id="overviewPromptTokens">0</div></div>
+                        <div><strong>总输出 Tokens</strong><div id="overviewCompletionTokens">0</div></div>
+                        <div><strong>凭证总数</strong><div id="overviewCredentials">0</div></div>
+                    </div>
+
+                    <div class="config-info" style="margin-top: 12px;">
+                        <h4>用户概览</h4>
+                        <div id="adminUserList" class="config-list">暂无用户统计</div>
+                    </div>
+                </div>
+
                 <div class="form-group">
                     <label for="newAccountUsername">账号</label>
                     <input type="text" id="newAccountUsername" placeholder="输入新账号">
@@ -1804,6 +1818,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
                     updateAccountTabVisibility();
+                    updateConfigTabVisibility();
                     if (isAdmin) {
                         await loadAccounts();
                     }
@@ -1836,6 +1851,23 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
         }
 
+        function updateConfigTabVisibility() {
+            const configButton = document.getElementById('configTabButton');
+            const configTab = document.getElementById('configTab');
+
+            if (!isAdmin) {
+                if (configButton) configButton.style.display = 'none';
+                if (configTab) configTab.classList.remove('active');
+                // 避免非管理员停留在配置页
+                const manageTabButton = document.querySelector("button.tab[onclick=\"switchTab('manage')\"]");
+                if (manageTabButton) {
+                    manageTabButton.click();
+                }
+            } else {
+                if (configButton) configButton.style.display = 'inline-block';
+            }
+        }
+
         async function loadAccounts() {
             if (!isAdmin) return;
             const listEl = document.getElementById('accountList');
@@ -1859,8 +1891,15 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     row.style.display = 'flex';
                     row.style.justifyContent = 'space-between';
                     row.style.alignItems = 'center';
-                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''}</span>`;
+                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''} ${account.disabled ? '（已禁用）' : ''}</span>`;
                     const actions = document.createElement('div');
+                    const disableBtn = document.createElement('button');
+                    disableBtn.textContent = account.disabled ? '启用' : '禁用';
+                    disableBtn.className = 'btn';
+                    disableBtn.style.backgroundColor = account.disabled ? '#28a745' : '#ffc107';
+                    disableBtn.style.marginRight = '8px';
+                    disableBtn.onclick = () => toggleAccount(account.username, !account.disabled);
+                    actions.appendChild(disableBtn);
                     const deleteBtn = document.createElement('button');
                     deleteBtn.textContent = '删除';
                     deleteBtn.className = 'btn';
@@ -1870,9 +1909,54 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     row.appendChild(actions);
                     listEl.appendChild(row);
                 });
+
+                await loadAdminOverview();
             } catch (error) {
                 listEl.classList.add('info');
                 listEl.innerHTML = `加载账号失败：${error.message}`;
+            }
+        }
+
+        async function loadAdminOverview() {
+            if (!isAdmin) return;
+            const overview = document.getElementById('adminOverview');
+            const userList = document.getElementById('adminUserList');
+            try {
+                const response = await fetch('/admin/overview', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '加载统计失败');
+
+                overview.classList.remove('hidden');
+                document.getElementById('overviewTotalCalls').textContent = data.totals.total_calls || 0;
+                document.getElementById('overviewPromptTokens').textContent = data.totals.total_prompt_tokens || 0;
+                document.getElementById('overviewCompletionTokens').textContent = data.totals.total_completion_tokens || 0;
+                document.getElementById('overviewCredentials').textContent = data.totals.total_credentials || 0;
+
+                if (!data.users || data.users.length === 0) {
+                    userList.textContent = '暂无用户统计';
+                    return;
+                }
+
+                userList.innerHTML = '';
+                data.users.forEach(user => {
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'status info';
+                    wrapper.style.marginBottom = '8px';
+                    wrapper.innerHTML = `
+                        <div><strong>${user.username}${user.is_admin ? '（管理员）' : ''}${user.disabled ? ' - 已禁用' : ''}</strong></div>
+                        <div>凭证：${user.credential_count || 0}</div>
+                        <div>调用：${user.usage?.total_all_model_calls || 0}</div>
+                        <div>输入Tokens：${user.usage?.total_prompt_tokens || 0}</div>
+                        <div>输出Tokens：${user.usage?.total_completion_tokens || 0}</div>
+                        <div>最后调用：${user.last_call ? new Date(user.last_call * 1000).toLocaleString() : '暂无'}</div>
+                    `;
+                    userList.appendChild(wrapper);
+                });
+            } catch (error) {
+                if (overview) overview.classList.add('hidden');
+                if (userList) userList.textContent = `加载统计失败：${error.message}`;
             }
         }
 
@@ -1924,6 +2008,26 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 await loadAccounts();
             } catch (error) {
                 showStatus(`删除账号失败：${error.message}`, 'error');
+            }
+        }
+
+        async function toggleAccount(username, disabled) {
+            if (!isAdmin) return;
+            try {
+                const response = await fetch(`/accounts/${encodeURIComponent(username)}/disable`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ disabled })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '操作失败');
+                showStatus(data.message || '状态已更新', 'success');
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`更新账号状态失败：${error.message}`, 'error');
             }
         }
 

@@ -33,9 +33,12 @@ import config
 from log import log
 
 from .account_manager import (
+    get_account,
     is_admin,
+    is_disabled,
     list_accounts,
     remove_account,
+    set_disabled,
     upsert_account,
 )
 from .auth import (
@@ -213,11 +216,15 @@ class AccountUpsertRequest(BaseModel):
     is_admin: bool = False
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+class AccountDisableRequest(BaseModel):
+    disabled: bool = True
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """验证认证令牌"""
     token = credentials.credentials
     username = get_token_username(token)
-    if not username or not verify_auth_token(token):
+    if not username or not await verify_auth_token(token):
         raise HTTPException(status_code=401, detail="无效的认证令牌")
     set_active_namespace(username)
     return token
@@ -343,7 +350,9 @@ async def upsert_account_route(request: AccountUpsertRequest, token: str = Depen
     if not await is_admin(username):
         raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
 
-    await upsert_account(request.username, request.password, request.is_admin)
+    await upsert_account(
+        request.username, request.password, request.is_admin, disabled=False
+    )
     return JSONResponse(content={"message": "账号已保存"})
 
 
@@ -355,6 +364,69 @@ async def delete_account(username: str, token: str = Depends(verify_token)):
 
     await remove_account(username)
     return JSONResponse(content={"message": "账号已删除"})
+
+
+@router.post("/accounts/{username}/disable")
+async def toggle_account_status(
+    username: str, request: AccountDisableRequest, token: str = Depends(verify_token)
+):
+    requester = get_token_username(token)
+    if not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+
+    if username == requester:
+        raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员账号")
+
+    await set_disabled(username, request.disabled)
+    action = "禁用" if request.disabled else "启用"
+    return JSONResponse(content={"message": f"账号已{action}"})
+
+
+@router.get("/admin/overview")
+async def get_admin_overview(token: str = Depends(verify_token)):
+    requester = get_token_username(token)
+    if not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以查看统计数据")
+
+    accounts = await list_accounts(include_sensitive=True)
+    totals = {
+        "total_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_credentials": 0,
+    }
+    users = []
+
+    for account in accounts:
+        username = account.get("username")
+        if not username:
+            continue
+
+        usage = await get_aggregated_stats(namespace=username)
+        storage_adapter = await get_storage_adapter(namespace=username)
+        try:
+            credential_count = len(await storage_adapter.list_credentials())
+        except Exception:
+            credential_count = 0
+
+        totals["total_calls"] += usage.get("total_all_model_calls", 0)
+        totals["total_prompt_tokens"] += usage.get("total_prompt_tokens", 0)
+        totals["total_completion_tokens"] += usage.get("total_completion_tokens", 0)
+        totals["total_credentials"] += credential_count
+
+        users.append(
+            {
+                "username": username,
+                "is_admin": account.get("is_admin", False),
+                "disabled": account.get("disabled", False),
+                "credential_count": credential_count,
+                "last_login": account.get("last_login"),
+                "last_call": account.get("last_call"),
+                "usage": usage,
+            }
+        )
+
+    return JSONResponse(content={"totals": totals, "users": users})
 
 
 @router.post("/auth/start")

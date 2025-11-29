@@ -332,6 +332,32 @@ async def get_panel_password() -> str:
     return str(await get_config_value("password", "pwd", "PASSWORD"))
 
 
+async def get_admin_username() -> str:
+    """获取管理员账号名称。
+
+    Environment variable: ADMIN_USERNAME
+    TOML config key: admin_username
+    Default: admin
+    """
+
+    return str(await get_config_value("admin_username", "admin", "ADMIN_USERNAME"))
+
+
+async def get_admin_password() -> str:
+    """获取管理员账号密码。
+
+    Environment variable: ADMIN_PASSWORD
+    TOML config key: admin_password
+    Default: Uses PANEL_PASSWORD/PASSWORD for backward compatibility.
+    """
+
+    admin_password = await get_config_value("admin_password", None, "ADMIN_PASSWORD")
+    if admin_password is not None:
+        return str(admin_password)
+
+    return await get_panel_password()
+
+
 async def get_server_password() -> str:
     """
     Get server password setting (deprecated, use get_api_password or get_panel_password).

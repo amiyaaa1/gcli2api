@@ -17,7 +17,14 @@ from urllib.parse import parse_qs, urlparse
 from config import get_config_value
 from log import log
 from .account_manager import authenticate as auth_accounts
-from .account_manager import ensure_default_account, is_admin
+from .account_manager import (
+    ensure_default_account,
+    get_account,
+    is_admin,
+    is_disabled,
+    update_last_call,
+    update_last_login,
+)
 
 from .google_oauth_api import (
     Credentials,
@@ -1215,7 +1222,10 @@ TOKEN_EXPIRY = 3600  # 1小时令牌过期时间
 async def verify_password(username: str, password: str) -> bool:
     """验证密码（面板登录使用），基于账户配置。"""
     await ensure_default_account()
-    return await auth_accounts(username, password)
+    valid = await auth_accounts(username, password)
+    if valid:
+        await update_last_login(username)
+    return valid
 
 
 def generate_auth_token(username: str) -> str:
@@ -1240,9 +1250,17 @@ def get_token_username(token: str) -> Optional[str]:
     return token_data.get("username")
 
 
-def verify_auth_token(token: str) -> bool:
+async def verify_auth_token(token: str) -> bool:
     """验证认证令牌"""
-    return get_token_username(token) is not None
+    username = get_token_username(token)
+    if not username:
+        return False
+
+    # 禁用用户无法通过令牌验证
+    if await is_disabled(username):
+        return False
+
+    return True
 
 
 def cleanup_expired_tokens():

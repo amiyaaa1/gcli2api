@@ -265,6 +265,8 @@ docker run -d --name gcli2api --network host -e PASSWORD=pwd -e PORT=7861 -v $(p
 docker run -d --name gcli2api --network host -e API_PASSWORD=api_pwd -e PANEL_PASSWORD=panel_pwd -e PORT=7861 -v $(pwd)/data/creds:/app/creds ghcr.io/su-kaka/gcli2api:latest
 ```
 
+> 部署在 Zeabur 等平台时，可通过环境变量 `CREDENTIALS_DIR` 将凭证目录指向挂载卷（例如 `/var/zeabur/creds`），所有生成的认证文件会直接写入该本地路径，便于持久化。
+
 **Docker Compose 运行命令**
 1. 将以下内容保存为 `docker-compose.yml` 文件：
     ```yaml

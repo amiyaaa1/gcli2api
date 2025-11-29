@@ -52,9 +52,9 @@ class AuthCallbackUrlRequest(BaseModel):
     project_id: str = None  # 可选的项目ID
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """验证认证令牌"""
-    if not verify_auth_token(credentials.credentials):
+    if not await verify_auth_token(credentials.credentials):
         raise HTTPException(status_code=401, detail="无效的认证令牌")
     return credentials.credentials
 

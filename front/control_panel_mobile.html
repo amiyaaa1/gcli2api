@@ -505,7 +505,7 @@
                 <button class="tab" onclick="switchTab('envload')">环境变量</button>
                 <button class="tab" onclick="switchTab('manage')">文件管理</button>
                 <button class="tab" onclick="switchTab('usage')">使用统计</button>
-                <button class="tab" onclick="switchTab('config')">配置管理</button>
+                <button id="configTabButton" class="tab" onclick="switchTab('config')">配置管理</button>
                 <button class="tab" onclick="switchTab('logs')">实时日志</button>
                 <button class="tab" onclick="switchTab('about')">项目信息</button>
             </div>
@@ -1379,6 +1379,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
     <script>
         // 基础变量
         let authToken = '';
+        let isAdmin = false;
         let currentProjectId = '';
         let authInProgress = false;
         let uploadSelectedFiles = []; // 上传页面用的文件列表
@@ -1444,8 +1445,10 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
 
                 if (response.ok) {
                     authToken = data.token;
+                    isAdmin = !!data.is_admin;
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
+                    updateConfigTabVisibility();
                     showStatus('登录成功', 'success');
                 } else {
                     showStatus(`登录失败: ${data.detail || data.error || '未知错误'}`, 'error');
@@ -1458,6 +1461,21 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         function handlePasswordEnter(event) {
             if (event.key === 'Enter') {
                 login();
+            }
+        }
+
+        function updateConfigTabVisibility() {
+            const configButton = document.getElementById('configTabButton');
+            const configTab = document.getElementById('configTab');
+            if (!isAdmin) {
+                if (configButton) configButton.style.display = 'none';
+                if (configTab) configTab.classList.remove('active');
+                const authTabButton = document.querySelector("button.tab[onclick=\"switchTab('auth')\"]");
+                if (authTabButton) {
+                    authTabButton.click();
+                }
+            } else {
+                if (configButton) configButton.style.display = 'inline-block';
             }
         }
 
