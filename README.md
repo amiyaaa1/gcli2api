@@ -20,6 +20,11 @@
 - 登录改为用户名+密码，默认管理员账号为 `admin`，密码沿用 `PANEL_PASSWORD`（未设置则回退到 `PASSWORD`，默认 `pwd`）。
 - 管理员在前端「账号管理」页即可新增/修改/删除账户并设置管理员权限。
 
+### 管理员账号说明
+- **默认账户**：用户名 `admin`，密码默认继承 `PANEL_PASSWORD`（未配置时继续回退到 `PASSWORD`，默认为 `pwd`）。
+- **环境变量修改**：在 Zeabur 环境变量中设置 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 可单独覆盖默认管理员用户名与密码；若不设置，则仍使用 `PANEL_PASSWORD`/`PASSWORD` 的回退逻辑。
+- **Zeabur 配置示例**：在部署模板的「Environment」中添加 `ADMIN_USERNAME=my_admin` 与 `ADMIN_PASSWORD=my_secure_password`，保存后重新部署即生效。
+
 ### 更新后使用方式
 1. **部署环境变量**：在 Zeabur 模板中设置 `PANEL_PASSWORD`（控制面板/默认管理员密码）以及 `API_PASSWORD`（聊天接口密码，可选）。
 2. **首次登录**：访问服务根路径，使用 `admin` + `PANEL_PASSWORD` 登录，获取面板令牌。
