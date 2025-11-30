@@ -924,7 +924,7 @@
                 <button class="tab" onclick="switchTab('envload')">环境变量</button>
                 <button class="tab" onclick="switchTab('manage')">文件管理</button>
                 <button class="tab" onclick="switchTab('usage')">使用统计</button>
-                <button class="tab" onclick="switchTab('config')">配置管理</button>
+                <button id="configTabButton" class="tab" onclick="switchTab('config')">配置管理</button>
                 <button class="tab" id="accountTabButton" style="display: none;" onclick="switchTab('account')">账户管理</button>
                 <button class="tab" onclick="switchTab('logs')">实时日志</button>
                 <button class="tab" onclick="switchTab('about')">项目信息</button>
@@ -941,6 +941,19 @@
                     </ul>
                     <p style="margin: 10px 0; color: #155724;"><strong>说明：</strong>无需手动启用API，系统会自动处理这些配置步骤，让认证流程更加顺畅。
                     </p>
+                </div>
+
+                <div id="apiKeyCard" class="status info"
+                    style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+                    <div>
+                        <strong>调用密钥</strong>
+                        <div id="apiKeyValue" style="word-break: break-all; font-family: monospace; margin-top: 6px;">暂无密钥</div>
+                        <small class="config-note">使用该密钥调用接口，刷新后旧密钥立即失效。</small>
+                    </div>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button class="btn" onclick="copyApiKey(currentApiKey)">复制密钥</button>
+                        <button class="btn" style="background-color: #17a2b8;" onclick="refreshApiKey()">刷新密钥</button>
+                    </div>
                 </div>
 
                 <!-- 折叠式 Project ID 输入框 -->
@@ -1564,6 +1577,20 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 <h3>账户管理（仅管理员可见）</h3>
                 <div class="status info" id="accountGuard">请使用管理员账户登录后管理子账户。</div>
 
+                <div id="adminOverview" class="hidden">
+                    <div class="status info" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+                        <div><strong>总调用次数</strong><div id="overviewTotalCalls">0</div></div>
+                        <div><strong>总输入 Tokens</strong><div id="overviewPromptTokens">0</div></div>
+                        <div><strong>总输出 Tokens</strong><div id="overviewCompletionTokens">0</div></div>
+                        <div><strong>凭证总数</strong><div id="overviewCredentials">0</div></div>
+                    </div>
+
+                    <div class="config-info" style="margin-top: 12px;">
+                        <h4>用户概览</h4>
+                        <div id="adminUserList" class="config-list">暂无用户统计</div>
+                    </div>
+                </div>
+
                 <div class="form-group">
                     <label for="newAccountUsername">账号</label>
                     <input type="text" id="newAccountUsername" placeholder="输入新账号">
@@ -1743,6 +1770,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         let authToken = '';
         let isAdmin = false;
         let currentUsername = '';
+        let currentApiKey = '';
         let credsData = {};
 
         // 分页和筛选相关变量
@@ -1767,6 +1795,82 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             } else {
                 console.error('statusSection not found');
                 alert(message); // 临时回退方案
+            }
+        }
+
+        async function loadApiKey(targetUsername = null, silent = false) {
+            if (!authToken) return;
+            const query = targetUsername ? `?username=${encodeURIComponent(targetUsername)}` : '';
+            try {
+                const response = await fetch(`/account/key${query}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '获取密钥失败');
+
+                if (!targetUsername || targetUsername === currentUsername) {
+                    renderApiKey(data.api_key);
+                }
+                return data.api_key;
+            } catch (error) {
+                if (!silent) {
+                    showStatus(`获取密钥失败：${error.message}`, 'error');
+                }
+            }
+        }
+
+        function renderApiKey(apiKey) {
+            currentApiKey = apiKey || '';
+            const valueEl = document.getElementById('apiKeyValue');
+            if (valueEl) {
+                valueEl.textContent = currentApiKey || '暂无密钥';
+            }
+        }
+
+        async function refreshApiKey(targetUsername = null, silent = false) {
+            if (!authToken) return;
+            try {
+                const response = await fetch('/account/key/refresh', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify(targetUsername ? { username: targetUsername } : {})
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '刷新密钥失败');
+
+                if (!targetUsername || targetUsername === currentUsername) {
+                    renderApiKey(data.api_key);
+                }
+
+                if (isAdmin && targetUsername) {
+                    await loadAccounts();
+                    await loadAdminOverview();
+                }
+
+                if (!silent) {
+                    showStatus(data.message || '密钥已刷新', 'success');
+                }
+                return data.api_key;
+            } catch (error) {
+                if (!silent) {
+                    showStatus(`刷新密钥失败：${error.message}`, 'error');
+                }
+            }
+        }
+
+        async function copyApiKey(value) {
+            if (!value) {
+                showStatus('暂无可复制的密钥', 'error');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(value);
+                showStatus('密钥已复制', 'success');
+            } catch (error) {
+                showStatus(`复制失败：${error.message}`, 'error');
             }
         }
 
@@ -1804,6 +1908,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
                     updateAccountTabVisibility();
+                    updateConfigTabVisibility();
+                    await loadApiKey();
                     if (isAdmin) {
                         await loadAccounts();
                     }
@@ -1836,6 +1942,23 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
         }
 
+        function updateConfigTabVisibility() {
+            const configButton = document.getElementById('configTabButton');
+            const configTab = document.getElementById('configTab');
+
+            if (!isAdmin) {
+                if (configButton) configButton.style.display = 'none';
+                if (configTab) configTab.classList.remove('active');
+                // 避免非管理员停留在配置页
+                const manageTabButton = document.querySelector("button.tab[onclick=\"switchTab('manage')\"]");
+                if (manageTabButton) {
+                    manageTabButton.click();
+                }
+            } else {
+                if (configButton) configButton.style.display = 'inline-block';
+            }
+        }
+
         async function loadAccounts() {
             if (!isAdmin) return;
             const listEl = document.getElementById('accountList');
@@ -1859,20 +1982,102 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     row.style.display = 'flex';
                     row.style.justifyContent = 'space-between';
                     row.style.alignItems = 'center';
-                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''}</span>`;
+
+                    const info = document.createElement('div');
+                    info.style.display = 'flex';
+                    info.style.flexDirection = 'column';
+                    info.style.gap = '4px';
+                    const title = document.createElement('div');
+                    title.innerHTML = `${account.username} ${account.is_admin ? '(管理员)' : ''} ${account.disabled ? '（已禁用）' : ''}`;
+                    const keyLine = document.createElement('div');
+                    keyLine.style.fontFamily = 'monospace';
+                    keyLine.textContent = `密钥：${account.api_key || '未生成'}`;
+                    info.appendChild(title);
+                    info.appendChild(keyLine);
+                    row.appendChild(info);
                     const actions = document.createElement('div');
+                    const disableBtn = document.createElement('button');
+                    disableBtn.textContent = account.disabled ? '启用' : '禁用';
+                    disableBtn.className = 'btn';
+                    disableBtn.style.backgroundColor = account.disabled ? '#28a745' : '#ffc107';
+                    disableBtn.style.marginRight = '8px';
+                    disableBtn.onclick = () => toggleAccount(account.username, !account.disabled);
+                    actions.appendChild(disableBtn);
                     const deleteBtn = document.createElement('button');
                     deleteBtn.textContent = '删除';
                     deleteBtn.className = 'btn';
                     deleteBtn.style.backgroundColor = '#dc3545';
                     deleteBtn.onclick = () => deleteAccount(account.username);
                     actions.appendChild(deleteBtn);
+
+                    const copyKeyBtn = document.createElement('button');
+                    copyKeyBtn.textContent = '复制密钥';
+                    copyKeyBtn.className = 'btn';
+                    copyKeyBtn.style.backgroundColor = '#17a2b8';
+                    copyKeyBtn.onclick = () => copyApiKey(account.api_key);
+                    actions.appendChild(copyKeyBtn);
+
+                    const refreshKeyBtn = document.createElement('button');
+                    refreshKeyBtn.textContent = '刷新密钥';
+                    refreshKeyBtn.className = 'btn';
+                    refreshKeyBtn.style.backgroundColor = '#0d6efd';
+                    refreshKeyBtn.onclick = async () => {
+                        await refreshApiKey(account.username, true);
+                        await loadAccounts();
+                    };
+                    actions.appendChild(refreshKeyBtn);
                     row.appendChild(actions);
                     listEl.appendChild(row);
                 });
+
+                await loadAdminOverview();
             } catch (error) {
                 listEl.classList.add('info');
                 listEl.innerHTML = `加载账号失败：${error.message}`;
+            }
+        }
+
+        async function loadAdminOverview() {
+            if (!isAdmin) return;
+            const overview = document.getElementById('adminOverview');
+            const userList = document.getElementById('adminUserList');
+            try {
+                const response = await fetch('/admin/overview', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '加载统计失败');
+
+                overview.classList.remove('hidden');
+                document.getElementById('overviewTotalCalls').textContent = data.totals.total_calls || 0;
+                document.getElementById('overviewPromptTokens').textContent = data.totals.total_prompt_tokens || 0;
+                document.getElementById('overviewCompletionTokens').textContent = data.totals.total_completion_tokens || 0;
+                document.getElementById('overviewCredentials').textContent = data.totals.total_credentials || 0;
+
+                if (!data.users || data.users.length === 0) {
+                    userList.textContent = '暂无用户统计';
+                    return;
+                }
+
+                        userList.innerHTML = '';
+                        data.users.forEach(user => {
+                            const wrapper = document.createElement('div');
+                            wrapper.className = 'status info';
+                            wrapper.style.marginBottom = '8px';
+                            wrapper.innerHTML = `
+                                <div><strong>${user.username}${user.is_admin ? '（管理员）' : ''}${user.disabled ? ' - 已禁用' : ''}</strong></div>
+                                <div>调用密钥：<code style="word-break: break-all;">${user.api_key || '未生成'}</code></div>
+                                <div>凭证：${user.credential_count || 0}</div>
+                                <div>调用：${user.usage?.total_all_model_calls || 0}</div>
+                                <div>输入Tokens：${user.usage?.total_prompt_tokens || 0}</div>
+                                <div>输出Tokens：${user.usage?.total_completion_tokens || 0}</div>
+                                <div>最后调用：${user.last_call ? new Date(user.last_call * 1000).toLocaleString() : '暂无'}</div>
+                            `;
+                            userList.appendChild(wrapper);
+                });
+            } catch (error) {
+                if (overview) overview.classList.add('hidden');
+                if (userList) userList.textContent = `加载统计失败：${error.message}`;
             }
         }
 
@@ -1924,6 +2129,26 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 await loadAccounts();
             } catch (error) {
                 showStatus(`删除账号失败：${error.message}`, 'error');
+            }
+        }
+
+        async function toggleAccount(username, disabled) {
+            if (!isAdmin) return;
+            try {
+                const response = await fetch(`/accounts/${encodeURIComponent(username)}/disable`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ disabled })
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '操作失败');
+                showStatus(data.message || '状态已更新', 'success');
+                await loadAccounts();
+            } catch (error) {
+                showStatus(`更新账号状态失败：${error.message}`, 'error');
             }
         }
 

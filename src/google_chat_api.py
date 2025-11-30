@@ -504,11 +504,25 @@ async def _handle_non_streaming_response(
     if resp.status_code == 200:
         try:
             # 记录成功响应
+            usage_metadata = (
+                standard_gemini_response.get("usageMetadata")
+                or google_api_response.get("response", {}).get("usageMetadata")
+                or google_api_response.get("usageMetadata")
+                or {}
+            )
+            prompt_tokens = usage_metadata.get("promptTokenCount", 0)
+            completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
+
             if current_file and credential_manager:
                 await credential_manager.record_api_call_result(current_file, True)
                 # 记录到使用统计
                 try:
-                    await record_successful_call(current_file, model_name)
+                    await record_successful_call(
+                        current_file,
+                        model_name,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
                 except Exception as e:
                     log.debug(f"Failed to record usage statistics: {e}")
 

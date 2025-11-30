@@ -33,9 +33,14 @@ import config
 from log import log
 
 from .account_manager import (
+    get_account,
+    get_account_api_key,
     is_admin,
+    is_disabled,
     list_accounts,
+    refresh_api_key,
     remove_account,
+    set_disabled,
     upsert_account,
 )
 from .auth import (
@@ -213,11 +218,19 @@ class AccountUpsertRequest(BaseModel):
     is_admin: bool = False
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+class AccountDisableRequest(BaseModel):
+    disabled: bool = True
+
+
+class ApiKeyRefreshRequest(BaseModel):
+    username: Optional[str] = None
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """验证认证令牌"""
     token = credentials.credentials
     username = get_token_username(token)
-    if not username or not verify_auth_token(token):
+    if not username or not await verify_auth_token(token):
         raise HTTPException(status_code=401, detail="无效的认证令牌")
     set_active_namespace(username)
     return token
@@ -307,7 +320,8 @@ async def serve_control_panel(request: Request):
 async def login(request: LoginRequest):
     """用户登录"""
     try:
-        if await verify_password(request.username, request.password):
+        result = await verify_password(request.username, request.password)
+        if result.get("success"):
             token = generate_auth_token(request.username)
             admin_flag = await is_admin(request.username)
             return JSONResponse(
@@ -319,7 +333,14 @@ async def login(request: LoginRequest):
                 }
             )
         else:
-            raise HTTPException(status_code=401, detail="密码错误")
+            reason = result.get("reason") if isinstance(result, dict) else None
+            if reason == "password_mismatch":
+                detail = "密码错误/该用户已存在，请更换注册用户名"
+            elif reason == "disabled":
+                detail = "账号已禁用"
+            else:
+                detail = "密码错误"
+            raise HTTPException(status_code=401, detail=detail)
     except HTTPException:
         raise
     except Exception as e:
@@ -333,8 +354,20 @@ async def list_all_accounts(token: str = Depends(verify_token)):
     if not await is_admin(username):
         raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
 
-    accounts = await list_accounts()
-    return JSONResponse(content={"accounts": accounts})
+    accounts = await list_accounts(include_sensitive=True)
+    safe_accounts = []
+    for account in accounts:
+        safe_accounts.append(
+            {
+                "username": account.get("username"),
+                "is_admin": account.get("is_admin", False),
+                "disabled": account.get("disabled", False),
+                "last_login": account.get("last_login"),
+                "last_call": account.get("last_call"),
+                "api_key": account.get("api_key"),
+            }
+        )
+    return JSONResponse(content={"accounts": safe_accounts})
 
 
 @router.post("/accounts")
@@ -343,7 +376,9 @@ async def upsert_account_route(request: AccountUpsertRequest, token: str = Depen
     if not await is_admin(username):
         raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
 
-    await upsert_account(request.username, request.password, request.is_admin)
+    await upsert_account(
+        request.username, request.password, request.is_admin, disabled=False
+    )
     return JSONResponse(content={"message": "账号已保存"})
 
 
@@ -355,6 +390,105 @@ async def delete_account(username: str, token: str = Depends(verify_token)):
 
     await remove_account(username)
     return JSONResponse(content={"message": "账号已删除"})
+
+
+@router.post("/accounts/{username}/disable")
+async def toggle_account_status(
+    username: str, request: AccountDisableRequest, token: str = Depends(verify_token)
+):
+    requester = get_token_username(token)
+    if not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
+
+    if username == requester:
+        raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员账号")
+
+    await set_disabled(username, request.disabled)
+    action = "禁用" if request.disabled else "启用"
+    return JSONResponse(content={"message": f"账号已{action}"})
+
+
+@router.get("/account/key")
+async def get_api_key(username: Optional[str] = None, token: str = Depends(verify_token)):
+    requester = get_token_username(token)
+    target_username = username or requester
+
+    if target_username != requester and not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以查看其他账号的密钥")
+
+    api_key = await get_account_api_key(target_username)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="未找到调用密钥")
+
+    return JSONResponse(content={"username": target_username, "api_key": api_key})
+
+
+@router.post("/account/key/refresh")
+async def refresh_api_key_route(
+    request: ApiKeyRefreshRequest, token: str = Depends(verify_token)
+):
+    requester = get_token_username(token)
+    target_username = request.username or requester
+
+    if target_username != requester and not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以重置其他账号的密钥")
+
+    try:
+        new_key = await refresh_api_key(target_username)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return JSONResponse(
+        content={"username": target_username, "api_key": new_key, "message": "密钥已刷新"}
+    )
+
+
+@router.get("/admin/overview")
+async def get_admin_overview(token: str = Depends(verify_token)):
+    requester = get_token_username(token)
+    if not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以查看统计数据")
+
+    accounts = await list_accounts(include_sensitive=True)
+    totals = {
+        "total_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_credentials": 0,
+    }
+    users = []
+
+    for account in accounts:
+        username = account.get("username")
+        if not username:
+            continue
+
+        usage = await get_aggregated_stats(namespace=username)
+        storage_adapter = await get_storage_adapter(namespace=username)
+        try:
+            credential_count = len(await storage_adapter.list_credentials())
+        except Exception:
+            credential_count = 0
+
+        totals["total_calls"] += usage.get("total_all_model_calls", 0)
+        totals["total_prompt_tokens"] += usage.get("total_prompt_tokens", 0)
+        totals["total_completion_tokens"] += usage.get("total_completion_tokens", 0)
+        totals["total_credentials"] += credential_count
+
+                users.append(
+                    {
+                        "username": username,
+                        "is_admin": account.get("is_admin", False),
+                        "disabled": account.get("disabled", False),
+                        "api_key": account.get("api_key"),
+                        "credential_count": credential_count,
+                        "last_login": account.get("last_login"),
+                        "last_call": account.get("last_call"),
+                        "usage": usage,
+                    }
+        )
+
+    return JSONResponse(content={"totals": totals, "users": users})
 
 
 @router.post("/auth/start")

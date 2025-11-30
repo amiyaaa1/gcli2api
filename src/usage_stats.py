@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from config import get_credentials_dir, is_mongodb_mode
 from log import log
 
+from .account_manager import update_last_call
 from .state_manager import get_state_manager
 from .storage_adapter import get_active_namespace, get_storage_adapter
 
@@ -134,6 +135,8 @@ class UsageStats:
                         usage_data = {
                             "gemini_2_5_pro_calls": stats_data.get("gemini_2_5_pro_calls", 0),
                             "total_calls": stats_data.get("total_calls", 0),
+                            "prompt_tokens": stats_data.get("prompt_tokens", 0),
+                            "completion_tokens": stats_data.get("completion_tokens", 0),
                             "next_reset_time": stats_data.get("next_reset_time"),
                             "daily_limit_gemini_2_5_pro": stats_data.get(
                                 "daily_limit_gemini_2_5_pro", 100
@@ -185,6 +188,8 @@ class UsageStats:
                     stats_data = {
                         "gemini_2_5_pro_calls": stats.get("gemini_2_5_pro_calls", 0),
                         "total_calls": stats.get("total_calls", 0),
+                        "prompt_tokens": stats.get("prompt_tokens", 0),
+                        "completion_tokens": stats.get("completion_tokens", 0),
                         "next_reset_time": stats.get("next_reset_time"),
                         "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
                         "daily_limit_total": stats.get("daily_limit_total", 1000),
@@ -225,6 +230,8 @@ class UsageStats:
             self._stats_cache[normalized_filename] = {
                 "gemini_2_5_pro_calls": 0,
                 "total_calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
                 "next_reset_time": next_reset.isoformat(),
                 "daily_limit_gemini_2_5_pro": 100,
                 "daily_limit_total": 1000,
@@ -274,7 +281,13 @@ class UsageStats:
             log.error(f"Error in daily quota reset check: {e}")
             return False
 
-    async def record_successful_call(self, filename: str, model_name: str):
+    async def record_successful_call(
+        self,
+        filename: str,
+        model_name: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ):
         """Record a successful API call for statistics."""
         if not self._initialized:
             await self.initialize()
@@ -291,6 +304,12 @@ class UsageStats:
                 is_gemini_2_5_pro = self._is_gemini_2_5_pro(model_name)
 
                 stats["total_calls"] += 1
+                stats["prompt_tokens"] = stats.get("prompt_tokens", 0) + max(
+                    0, prompt_tokens
+                )
+                stats["completion_tokens"] = stats.get("completion_tokens", 0) + max(
+                    0, completion_tokens
+                )
                 if is_gemini_2_5_pro:
                     stats["gemini_2_5_pro_calls"] += 1
 
@@ -310,6 +329,10 @@ class UsageStats:
 
         # Save stats asynchronously
         try:
+            try:
+                await update_last_call(self._namespace or get_active_namespace())
+            except Exception as update_err:
+                log.debug(f"Failed to record account last call time: {update_err}")
             await self._save_stats()
         except Exception as e:
             log.error(f"Failed to save usage statistics after recording: {e}")
@@ -329,6 +352,8 @@ class UsageStats:
                     "filename": normalized_filename,
                     "gemini_2_5_pro_calls": stats.get("gemini_2_5_pro_calls", 0),
                     "total_calls": stats.get("total_calls", 0),
+                    "prompt_tokens": stats.get("prompt_tokens", 0),
+                    "completion_tokens": stats.get("completion_tokens", 0),
                     "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
                     "daily_limit_total": stats.get("daily_limit_total", 1000),
                     "next_reset_time": stats.get("next_reset_time"),
@@ -342,6 +367,8 @@ class UsageStats:
                     all_stats[filename] = {
                         "gemini_2_5_pro_calls": stats.get("gemini_2_5_pro_calls", 0),
                         "total_calls": stats.get("total_calls", 0),
+                        "prompt_tokens": stats.get("prompt_tokens", 0),
+                        "completion_tokens": stats.get("completion_tokens", 0),
                         "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
                         "daily_limit_total": stats.get("daily_limit_total", 1000),
                         "next_reset_time": stats.get("next_reset_time"),
@@ -358,16 +385,22 @@ class UsageStats:
 
         total_gemini_2_5_pro = 0
         total_all_models = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
         total_files = len(all_stats)
 
         for stats in all_stats.values():
             total_gemini_2_5_pro += stats["gemini_2_5_pro_calls"]
             total_all_models += stats["total_calls"]
+            total_prompt_tokens += stats.get("prompt_tokens", 0)
+            total_completion_tokens += stats.get("completion_tokens", 0)
 
         return {
             "total_files": total_files,
             "total_gemini_2_5_pro_calls": total_gemini_2_5_pro,
             "total_all_model_calls": total_all_models,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
             "avg_gemini_2_5_pro_per_file": total_gemini_2_5_pro / max(total_files, 1),
             "avg_total_per_file": total_all_models / max(total_files, 1),
             "next_reset_time": _get_next_utc_7am().isoformat(),
@@ -457,10 +490,21 @@ async def get_usage_stats_instance(namespace: Optional[str] = None) -> UsageStat
     return _usage_stats_instances[key]
 
 
-async def record_successful_call(filename: str, model_name: str, namespace: Optional[str] = None):
+async def record_successful_call(
+    filename: str,
+    model_name: str,
+    namespace: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+):
     """Convenience function to record a successful API call."""
     stats = await get_usage_stats_instance(namespace)
-    await stats.record_successful_call(filename, model_name)
+    await stats.record_successful_call(
+        filename,
+        model_name,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 async def get_usage_stats(filename: str = None, namespace: Optional[str] = None) -> Dict[str, Any]:

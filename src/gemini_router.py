@@ -5,7 +5,6 @@ Gemini Router - Handles native Gemini format API requests
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, status
@@ -22,78 +21,61 @@ from config import (
 )
 from log import log
 
+from .account_manager import get_account_by_api_key, update_last_call
 from .anti_truncation import apply_anti_truncation_to_stream
 from .credential_manager import CredentialManager
 from .google_chat_api import build_gemini_payload_from_native, send_gemini_request
 from .openai_transfer import _extract_content_and_reasoning
+from .storage_adapter import set_active_namespace
 from .task_manager import create_managed_task
 
 # 创建路由器
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
-# 全局凭证管理器实例
-credential_manager = None
-
-
-@asynccontextmanager
-async def get_credential_manager():
-    """获取全局凭证管理器实例"""
-    global credential_manager
-    if not credential_manager:
-        credential_manager = CredentialManager()
-        await credential_manager.initialize()
-    yield credential_manager
+# 按用户隔离凭证管理器
+credential_managers: dict[str, CredentialManager] = {}
 
 
-async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """验证用户密码（Bearer Token方式）"""
-    from config import get_api_password
-
-    password = await get_api_password()
-    token = credentials.credentials
-    if token != password:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="密码错误")
-    return token
+async def get_user_credential_manager(username: str) -> CredentialManager:
+    manager = credential_managers.get(username)
+    if not manager:
+        manager = CredentialManager(namespace=username)
+        await manager.initialize()
+        credential_managers[username] = manager
+    elif not manager._initialized:
+        await manager.initialize()
+    return manager
 
 
 async def authenticate_gemini_flexible(
     request: Request,
     x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
     key: Optional[str] = Query(None),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(lambda: None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> str:
     """灵活验证：支持x-goog-api-key头部、URL参数key或Authorization Bearer"""
-    from config import get_api_password
 
-    password = await get_api_password()
+    api_key = key or x_goog_api_key
 
-    # 尝试从URL参数key获取（Google官方标准方式）
-    if key:
-        log.debug("Using URL parameter key authentication")
-        if key == password:
-            return key
+    if not api_key and credentials:
+        api_key = credentials.credentials
 
-    # 尝试从Authorization头获取（兼容旧方式）
-    auth_header = request.headers.get("authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header[7:]  # 移除 "Bearer " 前缀
-        log.debug("Using Bearer token authentication")
-        if token == password:
-            return token
+    if not api_key:
+        auth_header = request.headers.get("authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            api_key = auth_header[7:]
 
-    # 尝试从x-goog-api-key头获取（新标准方式）
-    if x_goog_api_key:
-        log.debug("Using x-goog-api-key authentication")
-        if x_goog_api_key == password:
-            return x_goog_api_key
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少调用密钥")
 
-    log.error(f"Authentication failed. Headers: {dict(request.headers)}, Query params: key={key}")
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Missing or invalid authentication. Use 'key' URL parameter, 'x-goog-api-key' header, or 'Authorization: Bearer <token>'",
-    )
+    account = await get_account_by_api_key(api_key)
+    if not account or not account.get("username"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无效或已禁用的调用密钥")
 
+    username = account["username"]
+    set_active_namespace(username)
+    return username
 
 @router.get("/v1/v1beta/models")
 @router.get("/v1/v1/models")
@@ -135,7 +117,7 @@ async def list_gemini_models():
 async def generate_content(
     model: str = Path(..., description="Model name"),
     request: Request = None,
-    api_key: str = Depends(authenticate_gemini_flexible),
+    username: str = Depends(authenticate_gemini_flexible),
 ):
     """处理Gemini格式的内容生成请求（非流式）"""
 
@@ -200,9 +182,8 @@ async def generate_content(
         )
 
     # 获取凭证管理器
-    from src.credential_manager import get_credential_manager
-
-    cred_mgr = await get_credential_manager()
+    cred_mgr = await get_user_credential_manager(username)
+    await update_last_call(username)
 
     # 获取有效凭证
     credential_result = await cred_mgr.get_valid_credential()
@@ -256,12 +237,12 @@ async def generate_content(
 async def stream_generate_content(
     model: str = Path(..., description="Model name"),
     request: Request = None,
-    api_key: str = Depends(authenticate_gemini_flexible),
+    username: str = Depends(authenticate_gemini_flexible),
 ):
     """处理Gemini格式的流式内容生成请求"""
     log.debug(f"Stream request received for model: {model}")
     log.debug(f"Request headers: {dict(request.headers)}")
-    log.debug(f"API key received: {api_key[:10] if api_key else None}...")
+    log.debug(f"Authenticated user: {username}")
     try:
         body = await request.body()
         log.debug(f"request body: {body.decode() if isinstance(body, bytes) else body}")
@@ -306,12 +287,11 @@ async def stream_generate_content(
 
     # 对于假流式模型，返回假流式响应
     if use_fake_streaming:
-        return await fake_stream_response_gemini(request_data, real_model)
+        return await fake_stream_response_gemini(request_data, real_model, username)
 
     # 获取凭证管理器
-    from src.credential_manager import get_credential_manager
-
-    cred_mgr = await get_credential_manager()
+    cred_mgr = await get_user_credential_manager(username)
+    await update_last_call(username)
 
     # 获取有效凭证
     credential_result = await cred_mgr.get_valid_credential()
@@ -350,9 +330,11 @@ async def stream_generate_content(
 @router.post("/v1beta/models/{model:path}:countTokens")
 @router.post("/v1/models/{model:path}:countTokens")
 async def count_tokens(
-    request: Request = None, api_key: str = Depends(authenticate_gemini_flexible)
+    request: Request = None, username: str = Depends(authenticate_gemini_flexible)
 ):
     """模拟Gemini格式的token计数"""
+
+    await update_last_call(username)
 
     try:
         request_data = await request.json()
@@ -394,7 +376,7 @@ async def count_tokens(
 @router.get("/v1/models/{model:path}")
 async def get_model_info(
     model: str = Path(..., description="Model name"),
-    api_key: str = Depends(authenticate_gemini_flexible),
+    username: str = Depends(authenticate_gemini_flexible),
 ):
     """获取特定模型的信息"""
 
@@ -420,15 +402,15 @@ async def get_model_info(
     return JSONResponse(content=model_info)
 
 
-async def fake_stream_response_gemini(request_data: dict, model: str):
+async def fake_stream_response_gemini(request_data: dict, model: str, username: str):
     """处理Gemini格式的假流式响应"""
+
+    await update_last_call(username)
 
     async def gemini_stream_generator():
         try:
             # 获取凭证管理器
-            from src.credential_manager import get_credential_manager
-
-            cred_mgr = await get_credential_manager()
+            cred_mgr = await get_user_credential_manager(username)
 
             # 获取有效凭证
             credential_result = await cred_mgr.get_valid_credential()
