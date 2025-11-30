@@ -34,9 +34,11 @@ from log import log
 
 from .account_manager import (
     get_account,
+    get_account_api_key,
     is_admin,
     is_disabled,
     list_accounts,
+    refresh_api_key,
     remove_account,
     set_disabled,
     upsert_account,
@@ -220,6 +222,10 @@ class AccountDisableRequest(BaseModel):
     disabled: bool = True
 
 
+class ApiKeyRefreshRequest(BaseModel):
+    username: Optional[str] = None
+
+
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """验证认证令牌"""
     token = credentials.credentials
@@ -314,7 +320,8 @@ async def serve_control_panel(request: Request):
 async def login(request: LoginRequest):
     """用户登录"""
     try:
-        if await verify_password(request.username, request.password):
+        result = await verify_password(request.username, request.password)
+        if result.get("success"):
             token = generate_auth_token(request.username)
             admin_flag = await is_admin(request.username)
             return JSONResponse(
@@ -326,7 +333,14 @@ async def login(request: LoginRequest):
                 }
             )
         else:
-            raise HTTPException(status_code=401, detail="密码错误")
+            reason = result.get("reason") if isinstance(result, dict) else None
+            if reason == "password_mismatch":
+                detail = "密码错误/该用户已存在，请更换注册用户名"
+            elif reason == "disabled":
+                detail = "账号已禁用"
+            else:
+                detail = "密码错误"
+            raise HTTPException(status_code=401, detail=detail)
     except HTTPException:
         raise
     except Exception as e:
@@ -340,8 +354,20 @@ async def list_all_accounts(token: str = Depends(verify_token)):
     if not await is_admin(username):
         raise HTTPException(status_code=403, detail="仅管理员可以管理账号")
 
-    accounts = await list_accounts()
-    return JSONResponse(content={"accounts": accounts})
+    accounts = await list_accounts(include_sensitive=True)
+    safe_accounts = []
+    for account in accounts:
+        safe_accounts.append(
+            {
+                "username": account.get("username"),
+                "is_admin": account.get("is_admin", False),
+                "disabled": account.get("disabled", False),
+                "last_login": account.get("last_login"),
+                "last_call": account.get("last_call"),
+                "api_key": account.get("api_key"),
+            }
+        )
+    return JSONResponse(content={"accounts": safe_accounts})
 
 
 @router.post("/accounts")
@@ -382,6 +408,41 @@ async def toggle_account_status(
     return JSONResponse(content={"message": f"账号已{action}"})
 
 
+@router.get("/account/key")
+async def get_api_key(username: Optional[str] = None, token: str = Depends(verify_token)):
+    requester = get_token_username(token)
+    target_username = username or requester
+
+    if target_username != requester and not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以查看其他账号的密钥")
+
+    api_key = await get_account_api_key(target_username)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="未找到调用密钥")
+
+    return JSONResponse(content={"username": target_username, "api_key": api_key})
+
+
+@router.post("/account/key/refresh")
+async def refresh_api_key_route(
+    request: ApiKeyRefreshRequest, token: str = Depends(verify_token)
+):
+    requester = get_token_username(token)
+    target_username = request.username or requester
+
+    if target_username != requester and not await is_admin(requester):
+        raise HTTPException(status_code=403, detail="仅管理员可以重置其他账号的密钥")
+
+    try:
+        new_key = await refresh_api_key(target_username)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return JSONResponse(
+        content={"username": target_username, "api_key": new_key, "message": "密钥已刷新"}
+    )
+
+
 @router.get("/admin/overview")
 async def get_admin_overview(token: str = Depends(verify_token)):
     requester = get_token_username(token)
@@ -414,16 +475,17 @@ async def get_admin_overview(token: str = Depends(verify_token)):
         totals["total_completion_tokens"] += usage.get("total_completion_tokens", 0)
         totals["total_credentials"] += credential_count
 
-        users.append(
-            {
-                "username": username,
-                "is_admin": account.get("is_admin", False),
-                "disabled": account.get("disabled", False),
-                "credential_count": credential_count,
-                "last_login": account.get("last_login"),
-                "last_call": account.get("last_call"),
-                "usage": usage,
-            }
+                users.append(
+                    {
+                        "username": username,
+                        "is_admin": account.get("is_admin", False),
+                        "disabled": account.get("disabled", False),
+                        "api_key": account.get("api_key"),
+                        "credential_count": credential_count,
+                        "last_login": account.get("last_login"),
+                        "last_call": account.get("last_call"),
+                        "usage": usage,
+                    }
         )
 
     return JSONResponse(content={"totals": totals, "users": users})

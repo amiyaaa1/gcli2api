@@ -525,6 +525,19 @@
                     </p>
                 </div>
 
+                <div id="apiKeyCard" class="status info"
+                    style="display: flex; flex-direction: column; gap: 8px; align-items: flex-start;">
+                    <div>
+                        <strong>调用密钥</strong>
+                        <div id="apiKeyValue" style="word-break: break-all; font-family: monospace; margin-top: 4px;">暂无密钥</div>
+                        <small style="display: block; color: #666; font-size: 12px; margin-top: 4px;">使用该密钥调用接口，刷新后旧密钥立即失效。</small>
+                    </div>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; width: 100%;">
+                        <button class="btn btn-small" onclick="copyApiKey(currentApiKey)">复制密钥</button>
+                        <button class="btn btn-small" style="background-color: #17a2b8;" onclick="refreshApiKey()">刷新密钥</button>
+                    </div>
+                </div>
+
                 <!-- 折叠式 Project ID 输入框 -->
                 <div class="form-group">
                     <div style="cursor: pointer; user-select: none; padding: 12px; border: 2px solid #ddd; border-radius: 8px; background: #f8f8f8; display: flex; justify-content: space-between; align-items: center;"
@@ -1426,6 +1439,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
         // 基础变量
         let authToken = '';
         let isAdmin = false;
+        let currentUsername = '';
+        let currentApiKey = '';
         let currentProjectId = '';
         let authInProgress = false;
         let uploadSelectedFiles = []; // 上传页面用的文件列表
@@ -1468,6 +1483,82 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
         }
 
+        async function loadApiKey(targetUsername = null, silent = false) {
+            if (!authToken) return;
+            const query = targetUsername ? `?username=${encodeURIComponent(targetUsername)}` : '';
+            try {
+                const response = await fetch(`/account/key${query}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '获取密钥失败');
+
+                if (!targetUsername || targetUsername === currentUsername) {
+                    renderApiKey(data.api_key);
+                }
+                return data.api_key;
+            } catch (error) {
+                if (!silent) {
+                    showStatus(`获取密钥失败：${error.message}`, 'error');
+                }
+            }
+        }
+
+        function renderApiKey(apiKey) {
+            currentApiKey = apiKey || '';
+            const valueEl = document.getElementById('apiKeyValue');
+            if (valueEl) {
+                valueEl.textContent = currentApiKey || '暂无密钥';
+            }
+        }
+
+        async function refreshApiKey(targetUsername = null, silent = false) {
+            if (!authToken) return;
+            try {
+                const response = await fetch('/account/key/refresh', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify(targetUsername ? { username: targetUsername } : {})
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.error || '刷新密钥失败');
+
+                if (!targetUsername || targetUsername === currentUsername) {
+                    renderApiKey(data.api_key);
+                }
+
+                if (isAdmin && targetUsername) {
+                    await loadAccounts();
+                    await loadAdminOverview();
+                }
+
+                if (!silent) {
+                    showStatus(data.message || '密钥已刷新', 'success');
+                }
+                return data.api_key;
+            } catch (error) {
+                if (!silent) {
+                    showStatus(`刷新密钥失败：${error.message}`, 'error');
+                }
+            }
+        }
+
+        async function copyApiKey(value) {
+            if (!value) {
+                showStatus('暂无可复制的密钥', 'error');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(value);
+                showStatus('密钥已复制', 'success');
+            } catch (error) {
+                showStatus(`复制失败：${error.message}`, 'error');
+            }
+        }
+
         // 登录相关函数
         async function login() {
             const password = document.getElementById('loginPassword').value;
@@ -1491,11 +1582,13 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
 
                 if (response.ok) {
                     authToken = data.token;
+                    currentUsername = data.username;
                     isAdmin = !!data.is_admin;
                     document.getElementById('loginSection').classList.add('hidden');
                     document.getElementById('mainSection').classList.remove('hidden');
                     updateConfigTabVisibility();
                     updateAccountTabVisibility();
+                    await loadApiKey();
                     if (isAdmin) {
                         await loadAccounts();
                     }
@@ -1604,7 +1697,19 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     row.style.display = 'flex';
                     row.style.justifyContent = 'space-between';
                     row.style.alignItems = 'center';
-                    row.innerHTML = `<span>${account.username} ${account.is_admin ? '(管理员)' : ''} ${account.disabled ? '（已禁用）' : ''}</span>`;
+
+                    const info = document.createElement('div');
+                    info.style.display = 'flex';
+                    info.style.flexDirection = 'column';
+                    info.style.gap = '4px';
+                    const title = document.createElement('div');
+                    title.innerHTML = `${account.username} ${account.is_admin ? '(管理员)' : ''} ${account.disabled ? '（已禁用）' : ''}`;
+                    const keyLine = document.createElement('div');
+                    keyLine.style.fontFamily = 'monospace';
+                    keyLine.textContent = `密钥：${account.api_key || '未生成'}`;
+                    info.appendChild(title);
+                    info.appendChild(keyLine);
+                    row.appendChild(info);
                     const actions = document.createElement('div');
                     const disableBtn = document.createElement('button');
                     disableBtn.textContent = account.disabled ? '启用' : '禁用';
@@ -1618,6 +1723,23 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     deleteBtn.style.backgroundColor = '#dc3545';
                     deleteBtn.onclick = () => deleteAccount(account.username);
                     actions.appendChild(deleteBtn);
+
+                    const copyKeyBtn = document.createElement('button');
+                    copyKeyBtn.textContent = '复制密钥';
+                    copyKeyBtn.className = 'btn btn-small';
+                    copyKeyBtn.style.backgroundColor = '#17a2b8';
+                    copyKeyBtn.onclick = () => copyApiKey(account.api_key);
+                    actions.appendChild(copyKeyBtn);
+
+                    const refreshKeyBtn = document.createElement('button');
+                    refreshKeyBtn.textContent = '刷新密钥';
+                    refreshKeyBtn.className = 'btn btn-small';
+                    refreshKeyBtn.style.backgroundColor = '#0d6efd';
+                    refreshKeyBtn.onclick = async () => {
+                        await refreshApiKey(account.username, true);
+                        await loadAccounts();
+                    };
+                    actions.appendChild(refreshKeyBtn);
                     row.appendChild(actions);
                     listEl.appendChild(row);
                 });
@@ -1651,18 +1773,19 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     return;
                 }
 
-                userList.innerHTML = '';
-                data.users.forEach(user => {
-                    const wrapper = document.createElement('div');
-                    wrapper.className = 'status info';
-                    wrapper.style.marginBottom = '8px';
-                    wrapper.innerHTML = `
-                        <div><strong>${user.username}${user.is_admin ? '（管理员）' : ''}${user.disabled ? ' - 已禁用' : ''}</strong></div>
-                        <div>凭证：${user.credential_count || 0}</div>
-                        <div>调用：${user.usage?.total_all_model_calls || 0}</div>
-                        <div>输入Tokens：${user.usage?.total_prompt_tokens || 0}</div>
-                        <div>输出Tokens：${user.usage?.total_completion_tokens || 0}</div>
-                        <div>最后调用：${user.last_call ? new Date(user.last_call * 1000).toLocaleString() : '暂无'}</div>
+                        userList.innerHTML = '';
+                        data.users.forEach(user => {
+                            const wrapper = document.createElement('div');
+                            wrapper.className = 'status info';
+                            wrapper.style.marginBottom = '8px';
+                            wrapper.innerHTML = `
+                                <div><strong>${user.username}${user.is_admin ? '（管理员）' : ''}${user.disabled ? ' - 已禁用' : ''}</strong></div>
+                                <div>调用密钥：<code style="word-break: break-all;">${user.api_key || '未生成'}</code></div>
+                                <div>凭证：${user.credential_count || 0}</div>
+                                <div>调用：${user.usage?.total_all_model_calls || 0}</div>
+                                <div>输入Tokens：${user.usage?.total_prompt_tokens || 0}</div>
+                                <div>输出Tokens：${user.usage?.total_completion_tokens || 0}</div>
+                                <div>最后调用：${user.last_call ? new Date(user.last_call * 1000).toLocaleString() : '暂无'}</div>
                     `;
                     userList.appendChild(wrapper);
                 });

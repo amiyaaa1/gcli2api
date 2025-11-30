@@ -7,9 +7,8 @@ import asyncio
 import json
 import time
 import uuid
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -22,6 +21,7 @@ from config import (
 )
 from log import log
 
+from .account_manager import get_account_by_api_key, update_last_call
 from .anti_truncation import apply_anti_truncation_to_stream
 from .credential_manager import CredentialManager
 from .google_chat_api import send_gemini_request
@@ -32,35 +32,49 @@ from .openai_transfer import (
     gemini_stream_chunk_to_openai,
     openai_request_to_gemini_payload,
 )
+from .storage_adapter import set_active_namespace
 from .task_manager import create_managed_task
 
 # 创建路由器
 router = APIRouter()
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
-# 全局凭证管理器实例
-credential_manager = None
-
-
-@asynccontextmanager
-async def get_credential_manager():
-    """获取全局凭证管理器实例"""
-    global credential_manager
-    if not credential_manager:
-        credential_manager = CredentialManager()
-        await credential_manager.initialize()
-    yield credential_manager
+# 全局凭证管理器实例（按用户隔离）
+credential_managers: dict[str, CredentialManager] = {}
 
 
-async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """验证用户密码"""
-    from config import get_api_password
+async def get_user_credential_manager(username: str) -> CredentialManager:
+    manager = credential_managers.get(username)
+    if not manager:
+        manager = CredentialManager(namespace=username)
+        await manager.initialize()
+        credential_managers[username] = manager
+    elif not manager._initialized:
+        await manager.initialize()
+    return manager
 
-    password = await get_api_password()
-    token = credentials.credentials
-    if token != password:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="密码错误")
-    return token
+
+async def authenticate_api_key(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    key: str | None = Query(None),
+) -> str:
+    """验证调用密钥，按账号隔离凭证。"""
+
+    api_key = key or (credentials.credentials if credentials else None)
+    if not api_key:
+        api_key = request.headers.get("x-api-key")
+
+    if not api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少调用密钥")
+
+    account = await get_account_by_api_key(api_key)
+    if not account or not account.get("username"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无效或已禁用的调用密钥")
+
+    username = account["username"]
+    set_active_namespace(username)
+    return username
 
 
 @router.get("/v1/models", response_model=ModelList)
@@ -71,7 +85,7 @@ async def list_models():
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(request: Request, token: str = Depends(authenticate)):
+async def chat_completions(request: Request, username: str = Depends(authenticate_api_key)):
     """处理OpenAI格式的聊天完成请求"""
 
     # 获取原始请求数据
@@ -141,9 +155,8 @@ async def chat_completions(request: Request, token: str = Depends(authenticate))
     request_data.model = real_model
 
     # 获取凭证管理器
-    from src.credential_manager import get_credential_manager
-
-    cred_mgr = await get_credential_manager()
+    cred_mgr = await get_user_credential_manager(username)
+    await update_last_call(username)
 
     # 获取有效凭证
     credential_result = await cred_mgr.get_valid_credential()

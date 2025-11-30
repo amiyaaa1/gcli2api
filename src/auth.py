@@ -1219,13 +1219,13 @@ auth_tokens: Dict[str, Dict[str, Any]] = {}  # 存储有效的认证令牌
 TOKEN_EXPIRY = 3600  # 1小时令牌过期时间
 
 
-async def verify_password(username: str, password: str) -> bool:
+async def verify_password(username: str, password: str) -> Dict[str, Any]:
     """验证密码（面板登录使用），基于账户配置。"""
     await ensure_default_account()
-    valid = await auth_accounts(username, password)
-    if valid:
+    result = await auth_accounts(username, password)
+    if result.get("success"):
         await update_last_login(username)
-    return valid
+    return result
 
 
 def generate_auth_token(username: str) -> str:
